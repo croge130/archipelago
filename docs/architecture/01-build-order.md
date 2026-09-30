@@ -21,6 +21,22 @@ action." That specific sentence needs Transit *and* Gatehouse-core *and*
 Policy to all already exist. It does not need to exist for any of the three
 to exist on their own.
 
+**A node in this graph is a dependency unit, not a claim about internal Go
+package structure.** "Gatehouse-core doesn't depend on Transit" is a
+statement about the external boundary — whatever Gatehouse-core turns out
+to be made of, none of it needs Transit to exist. It is not a claim that
+Gatehouse-core is, or should be, exactly one package. Gatehouse-core in
+particular — principals, credentials, grants, roles, groups, policy
+evaluation, sessions, multiple auth providers — is large enough that it
+almost certainly decomposes into its own internal sub-graph of packages,
+using this same base/integration reasoning one level down (e.g., maybe
+principals and grants don't need each other to exist, while evaluation
+is itself an "integration" of both). That decomposition is deliberately
+not decided here — it's exactly the kind of structural call that should
+wait for real code, per
+[`02-package-boundaries.md`](02-package-boundaries.md)'s note on the same
+point, not be speculated upfront.
+
 ## Layer 0 — bedrock
 
 **DB schema and connection.** No dependencies. Everything else assumes this
@@ -33,7 +49,7 @@ individually useful with nothing else in this document existing yet.
 
 | Base | What it is | Needs |
 |---|---|---|
-| **Gatehouse-core** | Principals, credentials, grants, local authority evaluation, password/token auth | DB only |
+| **Gatehouse-core**¹ | Principals, credentials, grants, local authority evaluation, password/token auth | DB only |
 | **Policy** | Policy definitions/instances/contexts, resolution, generation-based caching | DB only |
 | **Cert-store / PKI** | CSR handling, CA signing, enrollment records | DB only (+ eventually a `Signer` backend — vTPM/HSM/YubiKey, decided later, swappable) |
 | **Transit (raw)** | WT/WS backends, delivery classes, byte-level peer identity extraction (`PeerIdentity()`) | Nothing — moving bytes between two processes doesn't need a DB, Gatehouse, or certs |
@@ -43,6 +59,12 @@ is presented — it can be tested with a throwaway self-signed cert long
 before the real cert store exists. It *produces* an identity; it never
 *interprets* one. That's what keeps it a base rather than pulling
 Gatehouse-core in as a dependency.
+
+¹ Treat "Gatehouse-core" as a name for a dependency unit, not a promise
+that it's one package. It's the most likely of the four to turn out to be
+several packages internally (principals, credentials, grants, evaluation,
+sessions as their own sub-graph) — see the note above and
+[`02-package-boundaries.md`](02-package-boundaries.md).
 
 ## Layer 2 — pairwise integrations
 

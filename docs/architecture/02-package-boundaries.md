@@ -5,6 +5,19 @@ This is the Go-package-level expression of
 documents should stay consistent — if a build-order dependency changes,
 this doc's import rules change with it.
 
+**A caveat that applies to everything below:** "gatehouse-core", "policy",
+"certstore", and "transit" are names for dependency units — groupings by
+the property of not needing the other groupings — not promises that each
+one is literally a single Go package. `gatehouse-core` in particular
+(principals, credentials, grants, evaluation, sessions, multiple auth
+providers) is large enough that it's very likely several packages
+internally, related to each other by the same base/integration reasoning
+one level down. That internal decomposition isn't decided here — it's a
+call to make once real code exists, not something to lock in from a
+diagram. What *is* fixed at this level: whatever `gatehouse-core` turns
+out to be made of, none of it imports anything belonging to `policy`,
+`certstore`, or `transit`, and vice versa.
+
 ## Why package boundaries specifically, not just discipline
 
 Go enforces visibility at the package boundary, not at any looser
@@ -25,9 +38,14 @@ file boundaries — pay for themselves.
 
 ## The rule
 
-**Layer 1 bases never import each other.** `gatehouse-core`, `policy`,
-`certstore`, and `transit` (raw) each have zero imports of the other
-three. This is checked, not just intended — see "Enforcing it" below.
+**Layer 1 bases never import each other, at the level of the base as a
+whole.** No package belonging to `gatehouse-core` imports anything
+belonging to `policy`, `certstore`, or `transit`, and the same holds in
+every other direction between the four. This says nothing about how many
+packages make up `gatehouse-core` internally, or how those internal
+packages relate to each other — only that the boundary around the whole
+base holds. This is checked, not just intended — see "Enforcing it"
+below.
 
 **Every Layer 2/3 integration is its own package that imports the bases it
 needs.** It is never folded into one of the bases it combines. Concretely:
@@ -59,18 +77,22 @@ discipline, and discipline alone doesn't hold at scale.
   something, when the goal is "no one outside this module" rather than
   "no one, period."
 - **A `go list`-based CI check (or a tool like `go-arch-lint`)** can assert
-  "package X must never import package Y" as an automated rule, not
-  something caught only in review. Worth setting up once the Layer 1
-  package boundaries are real, not deferred indefinitely.
+  a rule at the base level — "nothing under the `gatehouse/...` tree may
+  import anything under `transit/...`" — rather than needing to name
+  exact package paths, which is what makes this survive `gatehouse-core`
+  turning out to be several packages rather than one. Worth setting up
+  once the Layer 1 boundaries are real, not deferred indefinitely.
 
 ## Facades live inside their base, unless they need something extra
 
 A simple, ergonomic API (`RequirePermission(ctx, "some.permission")`) that
-just calls gatehouse-core's own evaluator with sane defaults belongs
-*inside* the `gatehouse-core` package as ordinary convenience functions —
-no new package, no new dependency. It only needs its own package if it
-pulls in something gatehouse-core itself doesn't need (e.g., a
-convenience that also touches transit). Splitting for its own sake, when
+just calls the real evaluator with sane defaults belongs inside whichever
+package within `gatehouse-core` owns evaluation, as ordinary convenience
+functions — no new package, no new dependency, regardless of how many
+packages `gatehouse-core` ends up being internally. It only needs a
+genuinely separate package if it pulls in something gatehouse-core itself
+doesn't need (e.g., a convenience that also touches transit). Splitting
+for its own sake, when
 there's no real additional dependency to keep optional, just scatters one
 coherent idea across files someone has to mentally reassemble — the same
 "match the tool to the real shape of the problem" discipline as everywhere
@@ -85,9 +107,19 @@ and why they behave differently once more than one facade is in play).
 
 ```mermaid
 flowchart TB
-    subgraph Base["Layer 1 — no imports of each other"]
+    subgraph GHCore["gatehouse-core (illustrative — not decided)"]
         direction LR
-        GH["gatehouse-core"]
+        GHP["principals"]
+        GHC["credentials"]
+        GHGR["grants"]
+        GHE["evaluation"]
+    end
+    GHP -.-> GHE
+    GHGR -.-> GHE
+
+    subgraph Base["Layer 1 — no base imports another base"]
+        direction LR
+        GHCore
         POL["policy"]
         CS["certstore"]
         TR["transit"]
@@ -103,11 +135,11 @@ flowchart TB
     TR --> MTLS
     CS --> MTLS
     TR --> PEERAUTH
-    GH --> PEERAUTH
+    GHCore --> PEERAUTH
     POL -.-> PEERAUTH
-    GH --> SSO
+    GHCore --> SSO
     CS --> SSO
     TR --> SSO
 
-    Note["No arrow ever points the other way:<br/>a base package never imports an integration,<br/>and no base imports another base."]
+    Note["No arrow ever points the other way:<br/>a base never imports an integration, and no base<br/>imports another base — regardless of how many<br/>packages a base turns out to be made of internally."]
 ```
