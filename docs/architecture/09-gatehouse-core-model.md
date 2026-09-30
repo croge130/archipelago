@@ -7,10 +7,10 @@
 Gatehouse-core's *external* shape (a Layer 1 base, DB only, no
 dependency on any other base) and left its *internal* package
 decomposition open until real code exists. Neither decided what a
-Principal, Credential, Grant, Role, Group, Session, or Context actually
-*is* — that gap is what this doc closes. Nothing here changes the
-dependency graph; it fills in the base the graph was already drawn
-around.
+Principal, Credential, Grant, Role, Group, Session, Context, or
+Permission actually *is* — that gap is what this doc closes. Nothing
+here changes the dependency graph; it fills in the base the graph was
+already drawn around.
 
 **A status table, not a false consensus.** The items below were arrived
 at with very different amounts of actual discussion. Treat the
@@ -28,10 +28,10 @@ correction, not as already settled:
 | Cross-app/shared-CA credential vocabulary stays open | confirmed (deferred on purpose) |
 | Credential shape, method-vs-credential split, storage per kind | confirmed |
 | Session shape, session-vs-credential invariant, no connection field | confirmed |
-| Role / Group / Template | proposed |
+| Role / Group / Template, RolePermission carries `effect` too | confirmed |
 | Deny effect (deny-always-wins, no graduated specificity) | confirmed |
-| Authority level | proposed |
-| Generations / freshness | proposed |
+| Authority level; minimal PermissionDefinition introduced | confirmed |
+| Generations / freshness (two counters, one invariant) | confirmed |
 
 ## Why no realm, concretely, not just as a slogan
 
@@ -272,13 +272,11 @@ grant, not a human clicking a button — still a meaningful distinction
 here, just renamed since "app" no longer disambiguates anything (there's
 only ever one).
 
-## Role, Group, Template — proposed
+## Role, Group, Template — confirmed
 
-*Loosely adapted from Lighthouse §18.2–18.4. Nothing about these three
-is realm-dependent, so the carry-forward is closer to verbatim than
-anything else in this doc — flagged as "proposed" only because it hasn't
-been explicitly discussed, not because there's a known reason to change
-it.*
+*Adapted from Lighthouse §18.2–18.4. Group and Template carry forward
+unchanged; Role needs one real addition now that deny exists, decided
+here rather than retrofitted later.*
 
 ```text
 Role      = live bundle of permissions, with inheritance (cycle-checked,
@@ -290,16 +288,72 @@ Template  = an explicitly-applied creation recipe; never live authority —
             created
 ```
 
-## Authority level — proposed
+**Role permissions need the same `effect` field Grant has.** A role's
+bundle isn't purely additive once deny is real: a `support-agent` role
+might inherit `employee`'s broad allow set while explicitly denying one
+sensitive permission it deliberately excludes even from what it
+inherits. Deciding this now avoids retrofitting `effect` onto an
+allow-only `RolePermission` table after code already assumes one:
 
-*Loosely adapted from Lighthouse §4.10, unchanged in substance.*
+```text
+RolePermission
+- role_id
+- permission_key (xor child_role_id, for inheritance edges)
+- effect          allow | deny
+```
+
+**Expansion flattens the whole inheritance chain into one pool before
+resolving — no separate "child overrides parent" rule.** Direct role
+permissions plus everything inherited, transitively, cycle-checked,
+become one flat set of `(permission, effect)` entries, and the *same*
+deny-always-wins rule from Grant evaluation applies uniformly across
+that pool, regardless of which role in the chain contributed which
+entry. One precedence mechanism, reused, not a second one invented for
+role conflicts specifically.
+
+Group needs no change: membership has no `effect` of its own — a
+principal either is or isn't a member. Template needs no change either:
+it applies a recipe of grants/role-permissions that already carry
+whatever effect they're meant to.
+
+## Authority level — confirmed
+
+*Adapted from Lighthouse §4.5, §4.10.*
 
 ```text
 standard | elevated | recovery_access
 ```
 
-Nothing about this is realm- or app-specific; it's the active posture of
-a session/request, independent of containment.
+The real question worth deciding now, not patching in later: **where
+does "this permission requires elevation to use at all" live?** Not on
+Grant — that would reintroduce a matching dimension right after
+deliberately removing graduated specificity from Grant evaluation for
+deny's sake. It lives on the permission definition itself, as metadata
+independent of any specific grant — a minimal `PermissionDefinition`,
+introduced here only far enough to give these two fields a home:
+
+```text
+PermissionDefinition
+- permission_key            namespaced, e.g. myapp.readinglist.delete
+- required_authority_level  standard | elevated | recovery_access
+- wildcard_includable       bool — can a wildcard grant
+                             (myapp.readinglist.*) satisfy a check
+                             against this key at all
+```
+
+Evaluation becomes two genuinely separate checks, not one blended one:
+*is there a matching grant with no overriding deny* (Grant/Role/Group,
+as above), and *separately*, *does the current session's authority
+level meet this permission's required minimum*. Keeping "who's been
+granted this" and "is the session currently elevated enough to use it"
+orthogonal — rather than folding elevation into Grant matching — is
+what keeps deny-always-wins valid as the *only* precedence rule Grant
+evaluation needs.
+
+`recovery_access` stays reserved, not built, same as before.
+`PermissionDefinition`'s fuller shape (Lighthouse also has risk class
+and audit policy here) isn't decided — only the two fields Authority
+level and wildcard matching need a home for are.
 
 ## Deny — confirmed, built from day one
 
@@ -346,17 +400,41 @@ around the need instead; given how consistently this design has favored
 the simpler, well-precedented option over the more expressive one until
 a real case demands otherwise, the same call applies here.
 
-## Generations and freshness — proposed
+## Generations and freshness — confirmed
 
-*Loosely adapted from Lighthouse §4.13, and already implicitly assumed
-by [`02-package-boundaries.md`](02-package-boundaries.md)'s note that
-Policy's Evaluation layer does "resolution + generation-based caching."*
+*Adapted from Lighthouse §4.13. Two counters here, not three — the
+third (`policy_generation`) belongs to the Policy base, tracked there;
+Gatehouse-core never imports Policy's type to get it, per
+[`02-package-boundaries.md`](02-package-boundaries.md)'s base-isolation
+rule.*
 
-Monotonic counters (grant generation, policy generation) recorded at
-evaluation time and compared for staleness, distinguishing *which*
-generation went stale and by how much — avoids requiring a live query on
-every permission check while staying honest about when a cached decision
-might be wrong.
+```text
+permission_schema_generation   bumps when a PermissionDefinition
+                                changes — a key registered, or its
+                                required_authority_level or
+                                wildcard_includable changed
+principal_grant_generation     bumps on anything that could change any
+                                principal's effective grants
+```
+
+**One global counter each, not per-principal.** Coarser invalidation —
+any principal's grant change invalidates every cached decision, not
+just that principal's — but simpler, matching both Lighthouse's own
+choice and the "simpler until a real case proves otherwise" reasoning
+used throughout this design. A per-principal or per-group counter graph
+would invalidate more precisely, but it's a real dependency-tracking
+system to get right, and nothing yet justifies that cost.
+
+**`principal_grant_generation` is one invariant, stated explicitly now
+so it can't drift into three unsynchronized bump points later:** it
+bumps on a direct grant change (allow or deny, added or revoked), a
+group membership change, and a role change (a `RolePermission` added or
+removed, or an inheritance edge added or removed) — anything that could
+alter what any principal is effectively authorized for, regardless of
+which table the change landed in. Writing this down as one rule now,
+rather than three separate bump calls scattered across Grant/Group/Role
+code, is exactly the cheap-now/expensive-later distinction this doc
+exists to get ahead of.
 
 ## What stays explicitly deferred
 
@@ -364,7 +442,12 @@ might be wrong.
   Credential above); mechanism not designed.
 - **Context hierarchy and policy conditions on contexts.** Exact-match
   only for now, same as Lighthouse's own Context v0.
-- **Deny evaluation.** Design-only until specificity/explainability
-  rules exist.
 - **Intra-app multi-tenancy.** No first-class concept; an app that needs
   it uses groups and context-scoped grants.
+- **`PermissionDefinition`'s fuller shape.** Only `required_authority_level`
+  and `wildcard_includable` are decided; Lighthouse's risk class and
+  audit policy fields aren't carried forward or rejected, just not
+  addressed yet.
+- **Per-principal/per-group generation granularity.** Staying with one
+  global counter each until coarse invalidation is shown to actually
+  cost something.
