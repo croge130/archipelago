@@ -45,6 +45,14 @@ following an app reaches for is the app's decision.
 
 ## DB access within a suite: symmetric or asymmetric
 
+This depends on a specific internal boundary inside Gatehouse-core that's
+fixed on purpose, ahead of the feature itself — see
+[`02-package-boundaries.md`](02-package-boundaries.md#one-internal-boundary-that-is-decided-structure--evaluation--storage):
+evaluation logic depends on a `Store` interface, never on a concrete
+storage implementation directly. Everything below is just different
+implementations of that one interface; none of it requires evaluation
+logic or calling code to change.
+
 Every service in a suite can embed the SDK and connect to the shared DB
 directly — simplest, no bottleneck, but every service holds real DB
 credentials, and there's no single enforcement point for authority

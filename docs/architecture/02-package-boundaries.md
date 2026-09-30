@@ -18,6 +18,57 @@ diagram. What *is* fixed at this level: whatever `gatehouse-core` turns
 out to be made of, none of it imports anything belonging to `policy`,
 `certstore`, or `transit`, and vice versa.
 
+## One internal boundary that *is* decided: structure / evaluation / storage
+
+Almost everything about `gatehouse-core`'s internal package count is
+open. This one isn't, because it's not a stylistic call — it's the
+precondition for a feature already committed to in
+[`03-multi-instance-and-suites.md`](03-multi-instance-and-suites.md):
+DB access eventually needs to be swappable for "talks to a remote
+intermediary service" (indirect access) or split asymmetrically (reads
+direct, writes through a designated service), without evaluation logic
+or calling code changing at all. That's only possible if three concerns
+are never collapsed into each other from the start:
+
+- **Structure** — the plain data types (`Principal`, `Credential`,
+  `Grant`, `Role`, `Group`, request/result shapes). No logic, no storage
+  calls, nothing but definitions. Everything else depends on this; it
+  depends on nothing.
+- **Evaluation** — the logic that answers "does this principal have this
+  grant." Depends on Structure for its types, and on a `Store`-shaped
+  *interface* for reading/writing them — never on a concrete storage
+  implementation directly.
+- **Storage** — a concrete implementation of that `Store` interface.
+  Depends on Structure. A local-DB implementation is the first one; a
+  remote-intermediary-backed implementation, or one that's direct-for-reads
+  and remote-for-writes, are later implementations of the *same*
+  interface, not a reason to touch Evaluation.
+
+The dependency points the opposite way from how it might read naturally:
+Storage depends on Structure and implements the interface; Evaluation
+depends on the interface, never on Storage. That inversion is what lets
+Storage be swapped later without Evaluation or any calling code noticing.
+
+Exactly how many packages this becomes, and what they're named, is still
+open — this section fixes the *shape* of the boundary, not the package
+layout around it.
+
+```mermaid
+flowchart LR
+    STRUCT["Structure<br/>(types only)"]
+    EVAL["Evaluation<br/>(logic, depends on Store interface)"]
+    IFACE(("Store interface"))
+    DBIMPL["Local DB<br/>(Store implementation, today)"]
+    REMOTEIMPL["Remote intermediary<br/>(Store implementation, later)"]
+
+    STRUCT --> EVAL
+    EVAL -.depends on.-> IFACE
+    STRUCT --> DBIMPL
+    STRUCT --> REMOTEIMPL
+    DBIMPL -.implements.-> IFACE
+    REMOTEIMPL -.implements.-> IFACE
+```
+
 ## Why package boundaries specifically, not just discipline
 
 Go enforces visibility at the package boundary, not at any looser
