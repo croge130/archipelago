@@ -215,6 +215,7 @@ differently; see
 | `04-facades-and-ergonomics.md` | Simple-mode APIs over the full Gatehouse model, endpoint self-advertisement |
 | `05-pki-and-signing.md` | CA/CSR enrollment, key-tiering, CRL, cert store |
 | `06-logging-and-observability.md` | Logging as bedrock, operational vs. audit logging, standard trace/span terminology, trace/log aggregation |
+| `07-config-formats-and-templating.md` | Why XML/HCL/TOML split by content shape, HCL as declarative "ensure this exists" templates over the same facade API |
 
 Config format split, settled and not up for relitigating without a new
 concrete reason: **XML** for document-shaped content (docs, dashboards),
@@ -222,4 +223,5 @@ concrete reason: **XML** for document-shaped content (docs, dashboards),
 permissions — validated cross-references matter more here than terseness),
 **TOML** for flat operational settings (endpoints, ports, CRL/cert
 settings — comments and no implicit-type coercion matter more here than
-expressiveness).
+expressiveness). See [`07-config-formats-and-templating.md`](07-config-formats-and-templating.md)
+for the full rationale and how HCL templates relate to the facade API.

@@ -10,6 +10,13 @@ never a parallel implementation that usually agrees with it. Two code
 paths that are supposed to agree can silently diverge; one evaluator with
 two entry points cannot.
 
+This applies just as much to non-code callers. An HCL "ensure these
+principals/roles/groups/grants exist" template (see
+[`07-config-formats-and-templating.md`](07-config-formats-and-templating.md))
+is parsed and then applied as the same `Ensure*`-style calls a facade
+already exposes — another caller of the one real evaluator, not a second
+way to create authority state.
+
 Concretely, a facade's opinions are expressed through exactly two
 mechanisms:
 
