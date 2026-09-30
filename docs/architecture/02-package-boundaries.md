@@ -6,8 +6,9 @@ documents should stay consistent — if a build-order dependency changes,
 this doc's import rules change with it.
 
 **A caveat that applies to everything below:** "gatehouse-core", "policy",
-"certstore", and "transit" are names for dependency units — groupings by
-the property of not needing the other groupings — not promises that each
+"certstore", "transit", and "alias" are names for dependency units —
+groupings by the property of not needing the other groupings — not
+promises that each
 one is literally a single Go package. `gatehouse-core` in particular
 (principals, credentials, grants, evaluation, sessions, multiple auth
 providers) is large enough that it's very likely several packages
@@ -60,6 +61,11 @@ should:**
   DB as Storage for the records (independent of where the *signing key*
   itself lives, which is the separate `Signer` abstraction in
   [`05-pki-and-signing.md`](05-pki-and-signing.md)).
+- **Alias** — yes: the table+name→target entry and its lifecycle
+  (active/released) as Structure, resolve/ensure/release as Evaluation,
+  DB as Storage — the same reasoning as the other three, just not yet
+  written down here when Alias was added as a Layer-1 base in
+  [`01-build-order.md`](01-build-order.md).
 - **Transit (raw)** — not obviously the same shape, worth being honest
   about rather than forcing the pattern everywhere. Its state (open
   connections, channels) is transient and connection-scoped, not
@@ -109,8 +115,8 @@ file boundaries — pay for themselves.
 
 **Layer 1 bases never import each other, at the level of the base as a
 whole.** No package belonging to `gatehouse-core` imports anything
-belonging to `policy`, `certstore`, or `transit`, and the same holds in
-every other direction between the four. This says nothing about how many
+belonging to `policy`, `certstore`, `transit`, or `alias`, and the same
+holds in every other direction between the five. This says nothing about how many
 packages make up `gatehouse-core` internally, or how those internal
 packages relate to each other — only that the boundary around the whole
 base holds. This is checked, not just intended — see "Enforcing it"
@@ -146,8 +152,8 @@ discipline, and discipline alone doesn't hold at scale.
   something, when the goal is "no one outside this module" rather than
   "no one, period."
 - **A `go list`-based CI check (or a tool like `go-arch-lint`)** can assert
-  a rule at the base level — "nothing under the `gatehouse/...` tree may
-  import anything under `transit/...`" — rather than needing to name
+  a rule at the base level — "nothing under the `gatehouse-core/...` tree
+  may import anything under `transit/...`" — rather than needing to name
   exact package paths, which is what makes this survive `gatehouse-core`
   turning out to be several packages rather than one. Worth setting up
   once the Layer 1 boundaries are real, not deferred indefinitely.
@@ -192,6 +198,7 @@ flowchart TB
         POL["policy"]
         CS["certstore"]
         TR["transit"]
+        ALIAS["alias"]
     end
 
     subgraph Integrations["Layer 2/3 — each imports only what it needs"]
@@ -199,6 +206,7 @@ flowchart TB
         MTLS["mtls<br/>(transit + certstore)"]
         PEERAUTH["peerauth<br/>(transit + gatehouse-core + policy)"]
         SSO["sso<br/>(gatehouse-core + certstore + transit)"]
+        ALIASAUTH["aliasauth<br/>(alias + gatehouse-core)"]
     end
 
     TR --> MTLS
@@ -209,6 +217,8 @@ flowchart TB
     GHCore --> SSO
     CS --> SSO
     TR --> SSO
+    ALIAS --> ALIASAUTH
+    GHCore --> ALIASAUTH
 
     Note["No arrow ever points the other way:<br/>a base never imports an integration, and no base<br/>imports another base — regardless of how many<br/>packages a base turns out to be made of internally."]
 ```
