@@ -109,6 +109,61 @@ afterward. Cert-as-credential (the Layer 2 integration with certstore,
 `02-package-boundaries.md`) is a second, independent way a request
 authenticates — a certificate itself, not a token derived from one.
 
+### Storage: one table per credential kind, not grouped by shape
+
+*Confirmed, after checking against Lighthouse's own actual field shapes
+(§10.1, §9.1) rather than assuming.* A first pass at this grouped
+storage by confidentiality property — one shared table for anything
+verified by "hash and compare," on the theory that password and token
+credentials are the same shape. They aren't, once the real fields are
+on the table: password credentials carry memory-hard hash parameters,
+failed-attempt lockout tracking, and rehash-on-success bookkeeping that
+token credentials have no use for at all (a token is already
+high-entropy, so it's hashed fast with no cost parameters and never
+rehashed). Sharing one table would mean a pile of columns only one kind
+ever populates — the exact nullable-column sprawl a single generic
+"secrets" table was already rejected for. Lighthouse's own choice (a
+separate table per credential kind: `passwords.go`, `tokens.go`,
+`passkeys.go`) holds up better than grouping did, and Archipelago
+carries that forward:
+
+```text
+password credentials   hash (memory-hard algorithm), hash params,
+                        lockout state, rehash-on-success tracking
+token credentials      hash (fast, no cost params), purpose, scope,
+                        expiry — tokens are never rehashed
+totp credentials       encrypted secret (reversible — the code has to
+                        be computed from it), key version for rotation
+passkey credentials    public key material, sign count, transports —
+                        not a secret at all; never hashed or encrypted
+cert-as-credential     no secret storage in gatehouse-core at all — a
+                        reference into certstore's own records, never
+                        a copy of the certificate or key
+```
+
+What *is* still a useful, shared idea across those rows — verification
+falls into exactly three operations (hash-and-compare, decrypt-and-
+compute, or check-a-public-key), and that's a property of Evaluation's
+logic, not a reason to collapse Storage into fewer tables.
+
+**Deferred, reusing the TOTP machinery once it exists:** once an
+encrypted, rotatable-key credential table exists for TOTP, the same
+mechanism generalizes into an app-facing "store my own reversible
+secret" capability — a thinner facade over what's already there, not a
+new subsystem. Deferred because TOTP itself isn't built yet, so there's
+nothing yet to generalize from.
+
+**Gatehouse-core owns storage for the kinds it implements itself**
+(password, TOTP, passkey, session tokens) — pushing that to the app
+would reintroduce exactly the tax Archipelago exists to remove
+(`00-overview.md` §6). For a kind it doesn't natively implement,
+it stores only an opaque reference + metadata — Lighthouse's own §14
+"provider boundary" concept, loosely carried forward — and the app or a
+future provider owns verification and secret storage for that kind.
+
+Hash-at-rest, raw-once-at-mint, fingerprint-only-in-logs carries forward
+unchanged from Lighthouse's own conventions, regardless of table shape.
+
 **Deliberately left open, per this conversation:** a future credential
 kind for a principal whose proof came from a *different app entirely* —
 possibly a certificate signed by some shared CA multiple apps trust,

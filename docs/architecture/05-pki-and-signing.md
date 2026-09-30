@@ -81,6 +81,29 @@ sequenceDiagram
     CA-->>App: Issued certificate
 ```
 
+## Keystore access isn't just internal
+
+Everything above is framed around certstore's own internal needs (mTLS
+peers, dedicated signing keys, admin keys). It needs to be a real,
+general-purpose capability an app's own code can reach too — adding and
+removing its own keystore entries, public or private, through the same
+enrollment/CA machinery, not a separate one-off path built later. This
+was already the intent behind making the enrollment ceremony generic
+across purposes (above); this just says it out loud rather than leaving
+it implicit — the purpose list isn't closed to Archipelago's own
+built-in uses.
+
+Hardware-backed generation should be available to those app-created
+keys wherever the underlying hardware exists, through the same `Signer`
+abstraction below — an app doesn't get a second, separate hardware-key
+API. What this defers, explicitly: the actual cross-platform abstraction
+over each OS's native crypto API (Secure Enclave, TPM, PKCS#11, Android
+Keystore) needed to make hardware-backed generation real across
+platforms. Acknowledged, not designed — a real, meaty subsystem of its
+own for later, the same treatment as the still-unshaped cross-app
+credential case in
+[`09-gatehouse-core-model.md`](09-gatehouse-core-model.md).
+
 ## Signing hardware is a swappable abstraction
 
 A `Signer` interface — software key, PKCS#11-backed HSM, TPM-sealed key,
