@@ -18,26 +18,23 @@ diagram. What *is* fixed at this level: whatever `gatehouse-core` turns
 out to be made of, none of it imports anything belonging to `policy`,
 `certstore`, or `transit`, and vice versa.
 
-## One internal boundary that *is* decided: structure / evaluation / storage
+## A decided internal boundary, and it's a general pattern, not a Gatehouse one
 
-Almost everything about `gatehouse-core`'s internal package count is
-open. This one isn't, because it's not a stylistic call — it's the
-precondition for a feature already committed to in
-[`03-multi-instance-and-suites.md`](03-multi-instance-and-suites.md):
-DB access eventually needs to be swappable for "talks to a remote
-intermediary service" (indirect access) or split asymmetrically (reads
-direct, writes through a designated service), without evaluation logic
-or calling code changing at all. That's only possible if three concerns
-are never collapsed into each other from the start:
+This isn't specific to `gatehouse-core` — it's the shape any base takes
+whenever it has persisted domain data with logic over it, and it applies
+wherever that's true, not just there. It was fixed for Gatehouse-core
+first because the asymmetric/indirect DB access feature in
+[`03-multi-instance-and-suites.md`](03-multi-instance-and-suites.md) was
+decided first, but the reasoning doesn't reference anything
+Gatehouse-specific:
 
-- **Structure** — the plain data types (`Principal`, `Credential`,
-  `Grant`, `Role`, `Group`, request/result shapes). No logic, no storage
-  calls, nothing but definitions. Everything else depends on this; it
-  depends on nothing.
-- **Evaluation** — the logic that answers "does this principal have this
-  grant." Depends on Structure for its types, and on a `Store`-shaped
-  *interface* for reading/writing them — never on a concrete storage
-  implementation directly.
+- **Structure** — the plain data types. No logic, no storage calls,
+  nothing but definitions. Everything else depends on this; it depends on
+  nothing.
+- **Evaluation** — the logic that operates over Structure. Depends on
+  Structure for its types, and on a `Store`-shaped *interface* for
+  reading/writing them — never on a concrete storage implementation
+  directly.
 - **Storage** — a concrete implementation of that `Store` interface.
   Depends on Structure. A local-DB implementation is the first one; a
   remote-intermediary-backed implementation, or one that's direct-for-reads
@@ -48,6 +45,27 @@ The dependency points the opposite way from how it might read naturally:
 Storage depends on Structure and implements the interface; Evaluation
 depends on the interface, never on Storage. That inversion is what lets
 Storage be swapped later without Evaluation or any calling code noticing.
+
+**Where this applies, concretely, and where it's genuinely unclear it
+should:**
+
+- **Gatehouse-core** — yes, as above: principals/credentials/grants as
+  Structure, authority checks as Evaluation, DB as the first Storage.
+- **Policy** — yes, same shape: policy definitions/instances/contexts as
+  Structure, resolution + generation-based caching as Evaluation, DB as
+  Storage. A federated deployment may eventually want policy storage
+  shared or centralized in ways that make the same swap useful.
+- **Cert-store / PKI** — yes: CSRs/certificates/enrollment records as
+  Structure, CA signing and purpose→policy-tier decisions as Evaluation,
+  DB as Storage for the records (independent of where the *signing key*
+  itself lives, which is the separate `Signer` abstraction in
+  [`05-pki-and-signing.md`](05-pki-and-signing.md)).
+- **Transit (raw)** — not obviously the same shape, worth being honest
+  about rather than forcing the pattern everywhere. Its state (open
+  connections, channels) is transient and connection-scoped, not
+  persisted domain data the way the other three have. Nothing here says
+  it *can't* fit; nothing decided yet says it *does*, and it shouldn't be
+  assumed to just because the other three do.
 
 Exactly how many packages this becomes, and what they're named, is still
 open — this section fixes the *shape* of the boundary, not the package

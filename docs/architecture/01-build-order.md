@@ -44,7 +44,7 @@ exists, the same starting point Lighthouse's own `ProvisionSchemas` used.
 
 ## Layer 1 — independent bases
 
-These four do not depend on each other. Each is buildable, testable, and
+These five do not depend on each other. Each is buildable, testable, and
 individually useful with nothing else in this document existing yet.
 
 | Base | What it is | Needs |
@@ -53,12 +53,28 @@ individually useful with nothing else in this document existing yet.
 | **Policy** | Policy definitions/instances/contexts, resolution, generation-based caching | DB only |
 | **Cert-store / PKI** | CSR handling, CA signing, enrollment records | DB only (+ eventually a `Signer` backend — vTPM/HSM/YubiKey, decided later, swappable) |
 | **Transit (raw)** | WT/WS backends, delivery classes, byte-level peer identity extraction (`PeerIdentity()`) | Nothing — moving bytes between two processes doesn't need a DB, Gatehouse, or certs |
+| **Alias** | Table + name → opaque target value, with its own lifecycle (active/released), never load-bearing | DB only |
 
 Transit's `PeerIdentity()` extraction is pure crypto against whatever cert
 is presented — it can be tested with a throwaway self-signed cert long
 before the real cert store exists. It *produces* an identity; it never
 *interprets* one. That's what keeps it a base rather than pulling
 Gatehouse-core in as a dependency.
+
+**Alias is a core base this time, not a later addition, on purpose.** In
+Lighthouse it arrived after Gatehouse's core already existed with
+`realm_id NOT NULL` baked into the alias tables, and it took a whole
+migration phase to relax that once a genuinely realm-less table turned
+out to be real (Lighthouse's own built-in Manual document set). Building
+it as a Layer-1 base from day one, with no realm — or anything else —
+assumed mandatory, means that specific mistake can't recur; there's
+nothing to migrate away from because nothing was ever assumed. It fits
+the base shape naturally: resolving a name to a target is pure structure
+and evaluation over storage, and doesn't need Gatehouse to exist any more
+than Gatehouse-core needs Alias — *who's allowed to create or resolve* a
+given alias entry is a Layer 2 integration with Gatehouse-core, same as
+everything else that needs authorization layered on top of a base that
+doesn't require it to function.
 
 ¹ Treat "Gatehouse-core" as a name for a dependency unit, not a promise
 that it's one package. It's the most likely of the four to turn out to be
@@ -77,6 +93,7 @@ depends on both — never by one base importing the other directly.
 | **Peer authorization** | Transit + Gatehouse-core (+ Policy) | "Does this verified peer's identity resolve to a principal with this grant" |
 | **Cert-as-credential** | Gatehouse-core + Cert-store | Only if the credential model treats a certificate as a credential type — a real coupling to decide on purpose, not an accident |
 | **Sessions** | Gatehouse-core (+ Transit, for connection-bound sessions specifically) | AuthoritySession tied to a principal, optionally to a live connection |
+| **Alias authorization** | Alias + Gatehouse-core | *Who's allowed* to create, resolve, or release a given alias entry — Alias itself resolves a name with no opinion on this; this integration is what a caller reaches for the moment it needs one |
 
 ## Layer 3 — compound features
 
@@ -117,11 +134,13 @@ flowchart TB
         POL["Policy"]
         PKI["Cert-store / PKI"]
         TR["Transit (raw)"]
+        ALIAS["Alias"]
     end
 
     DB --> GH
     DB --> POL
     DB --> PKI
+    DB --> ALIAS
 
     subgraph L2["Layer 2 — pairwise integrations"]
         direction LR
@@ -129,6 +148,7 @@ flowchart TB
         PEERAUTH["Peer authorization"]
         CREDCERT["Cert-as-credential"]
         SESS["Sessions"]
+        ALIASAUTH["Alias authorization"]
     end
 
     TR --> MTLS
@@ -140,6 +160,8 @@ flowchart TB
     PKI --> CREDCERT
     GH --> SESS
     TR -.-> SESS
+    ALIAS --> ALIASAUTH
+    GH --> ALIASAUTH
 
     subgraph L3["Layer 3 — compound features"]
         direction LR

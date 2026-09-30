@@ -47,7 +47,7 @@ following an app reaches for is the app's decision.
 
 This depends on a specific internal boundary inside Gatehouse-core that's
 fixed on purpose, ahead of the feature itself — see
-[`02-package-boundaries.md`](02-package-boundaries.md#one-internal-boundary-that-is-decided-structure--evaluation--storage):
+[`02-package-boundaries.md`](02-package-boundaries.md#a-decided-internal-boundary-and-its-a-general-pattern-not-a-gatehouse-one):
 evaluation logic depends on a `Store` interface, never on a concrete
 storage implementation directly. Everything below is just different
 implementations of that one interface; none of it requires evaluation
