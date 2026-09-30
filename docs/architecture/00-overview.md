@@ -214,6 +214,7 @@ differently; see
 | `03-multi-instance-and-suites.md` | Peer discovery, broadcast, locks, status aggregation, DB access modes |
 | `04-facades-and-ergonomics.md` | Simple-mode APIs over the full Gatehouse model, endpoint self-advertisement |
 | `05-pki-and-signing.md` | CA/CSR enrollment, key-tiering, CRL, cert store |
+| `06-logging-and-observability.md` | Logging as bedrock, operational vs. audit logging, standard trace/span terminology, trace/log aggregation |
 
 Config format split, settled and not up for relitigating without a new
 concrete reason: **XML** for document-shaped content (docs, dashboards),

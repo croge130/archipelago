@@ -42,6 +42,18 @@ point, not be speculated upfront.
 **DB schema and connection.** No dependencies. Everything else assumes this
 exists, the same starting point Lighthouse's own `ProvisionSchemas` used.
 
+**Logging.** No dependencies — not even the DB. It comes first in
+practice, not just on paper: every other base and integration wants to
+call into it for its own observability the moment it exists, including
+while being built and tested. Used directly by everything above, not
+through an integration package, so it's deliberately left off the
+dependency graph below rather than drawn as an arrow into every single
+node — see [`06-logging-and-observability.md`](06-logging-and-observability.md)
+for the full design, including why this is genericity-first rather than
+just early, the standard trace/span terminology adopted instead of
+Lighthouse's own ad hoc vocabulary, and how Transit's propagation
+envelope carries correlation data for free.
+
 ## Layer 1 — independent bases
 
 These five do not depend on each other. Each is buildable, testable, and
@@ -106,6 +118,7 @@ These need Layer 2 integrations, not just Layer 1 bases directly.
 | **Status/health aggregation** | Policy (aggregation-policy pointer) + Transit (propagation envelope) + the same registry/grouping concept | Group definition holds a policy pointer; each computed rollup snapshots the resolved value |
 | **Endpoint self-advertisement** | Gatehouse-core (permission metadata declared at registration) + the registry | The thing that replaces a hand-maintained allowlist with a real source of truth |
 | **Admin/destructive-action key enrollment** | Cert-store (CSR+CA signing) + an out-of-band confirmation path (CLI) | Deliberately *not* gated by the same signed-request mechanism as app-level dangerous actions — machine access to the backend already implies broader trust than that mechanism would add |
+| **Trace/log aggregation** | Transit (propagation envelope's trace-context field) + the same registry/grouping concept Multi-instance coordination uses | What a coordinator/Viewer uses to stitch events from multiple instances into one causal story — a consumer of existing infrastructure, not new plumbing; see [`06-logging-and-observability.md`](06-logging-and-observability.md) |
 
 ## Layer 4 — deployment roles
 
@@ -170,6 +183,7 @@ flowchart TB
         STATUS["Status aggregation"]
         ENDPOINT["Endpoint advertisement"]
         ADMINKEY["Admin key enrollment"]
+        TRACEAGG["Trace/log aggregation"]
     end
 
     GH --> SSO
@@ -182,6 +196,8 @@ flowchart TB
     MULTI -.shared grouping.-> STATUS
     GH --> ENDPOINT
     PKI --> ADMINKEY
+    TR --> TRACEAGG
+    MULTI -.shared grouping.-> TRACEAGG
 
     subgraph L4["Layer 4 — deployment roles (config only)"]
         direction LR
