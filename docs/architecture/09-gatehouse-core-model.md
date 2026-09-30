@@ -29,7 +29,7 @@ correction, not as already settled:
 | Credential shape, method-vs-credential split, storage per kind | confirmed |
 | Session shape, session-vs-credential invariant, no connection field | confirmed |
 | Role / Group / Template | proposed |
-| Deny effect | proposed (staying design-only) |
+| Deny effect (deny-always-wins, no graduated specificity) | confirmed |
 | Authority level | proposed |
 | Generations / freshness | proposed |
 
@@ -257,7 +257,7 @@ Grant
 - permission_key     (xor role_id)
 - scope              global | context
 - context_type / context_id    (required iff scope = context)
-- effect             allow
+- effect             allow | deny
 - status             active | revoked
 - origin             builtin | manual | provisioned
 - metadata           opaque, never authorized on
@@ -301,16 +301,50 @@ standard | elevated | recovery_access
 Nothing about this is realm- or app-specific; it's the active posture of
 a session/request, independent of containment.
 
-## Deny — proposed, staying design-only
+## Deny — confirmed, built from day one
 
-Lighthouse never built deny evaluation — only `allow` exists as an
-effect — because deny's specificity rules (subject, permission,
-context, authority — which deny wins when more than one matches) need to
-be deterministic and *explainable* before it's safe to ship, and that
-explanation machinery was never built. That reasoning has nothing to do
-with realms either; it carries forward unchanged. `effect` stays a
-single-value field (`allow`) in the Grant shape above, not because deny
-is rejected, but because it's not earned yet.
+Lighthouse never built deny evaluation — `GrantEffectAllow` was the only
+effect constant — because their proposed precedence rule was *graduated*:
+subject specificity (principal beats group), permission specificity
+(exact beats wildcard/inherited), context specificity (exact beats
+ancestor), authority specificity (elevation-specific beats baseline).
+Getting four axes of "which is more specific" deterministic and
+explainable before shipping was the actual blocker, not deny as a
+concept.
+
+Archipelago sidesteps that problem rather than solving it, for reasons
+that hold up independently of each other:
+
+- **Two of the four axes are already gone.** Context has no hierarchy
+  at all (confirmed above), so "context: exact > ancestor" has nothing
+  to compare. Authority-level elevation specificity isn't a settled
+  concept here either.
+- **The remaining two don't need graduated ranking if deny always
+  wins.** Adopt AWS IAM's actual rule: *any matching deny overrides any
+  matching allow, unconditionally, no specificity comparison at all.*
+  Allow-grant matching never needed ranking to begin with — Lighthouse's
+  own allow-only evaluator just needed *any* matching grant, not the
+  *most specific* one. Ranking was only ever going to be needed to
+  resolve allow-vs-deny conflicts, and "deny wins" resolves that without
+  ranking anything.
+- **It's also the safer failure mode.** Ambiguity resolves toward
+  restriction, not permission — ties, overlaps, and edge cases in grant
+  matching all fail closed rather than open.
+
+Explanation, the thing Lighthouse said it hadn't built, falls out for
+free under this rule: a denial names the deny grant that matched, the
+same way an allow decision already names the grant that matched.
+Reporting which allow grant(s) *would* have matched too is a cheap
+addition (the same evaluation pass already computes both sets) but
+isn't required for the decision to be correct or explainable.
+
+**The trade-off, named honestly:** a broad deny can no longer have a
+narrower allow carved out as an exception to it (deny a group from
+everything, then allow one principal anyway) — once any deny matches,
+that's the answer, full stop. AWS IAM ships without this and structures
+around the need instead; given how consistently this design has favored
+the simpler, well-precedented option over the more expressive one until
+a real case demands otherwise, the same call applies here.
 
 ## Generations and freshness — proposed
 
