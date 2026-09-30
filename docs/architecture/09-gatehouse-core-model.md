@@ -26,8 +26,8 @@ correction, not as already settled:
 | No cross-tenant permissions, no first-class tenant concept | confirmed |
 | Principal types, `app_client` dropped, `external` generalized | confirmed |
 | Cross-app/shared-CA credential vocabulary stays open | confirmed (deferred on purpose) |
-| Credential shape, method-vs-credential split | proposed |
-| Session shape, session-vs-credential invariant | proposed |
+| Credential shape, method-vs-credential split, storage per kind | confirmed |
+| Session shape, session-vs-credential invariant, no connection field | confirmed |
 | Role / Group / Template | proposed |
 | Deny effect | proposed (staying design-only) |
 | Authority level | proposed |
@@ -174,37 +174,58 @@ Grant, or Session shape at all, the same way Lighthouse reserved
 `mtls_certificate`/`challenge_key` as vocabulary years before either had
 a provider.
 
-## Session — proposed
+## Session — confirmed
 
-*Loosely adapted from Lighthouse §8. Not yet discussed in depth.*
+*Adapted from Lighthouse §8, §8.3, §4.14.*
 
-The invariant worth keeping unchanged, because it has nothing to do with
-realms: **a session record alone never authenticates a request; only
-explicit credential material does.** A session is who/what is currently
-authenticated or asserted; a credential is how a given request proves it
-belongs to that session. Collapsing the two is exactly the escalation
-this split exists to prevent.
+The invariant carries forward unchanged, because it has nothing to do
+with realms: **a session record alone never authenticates a request;
+only explicit credential material does.** A session is who/what is
+currently authenticated or asserted; a credential is how a given
+request proves it belongs to that session. Collapsing the two is
+exactly the escalation this split exists to prevent — the same reason
+`credential_id` below stays singular and optional rather than a session
+carrying its own ambient authority.
 
 ```text
 SessionRecord
 - session_id
 - principal_id
-- credential_id?        present when a transport credential exists
-- session_kind          ui | cli | agent | service | automation | federated
+- credential_id?        present when a transport credential exists;
+                        absent for a service-mediated record that's
+                        authoritative but never itself bearer-usable
+- session_kind          ui | cli | agent | service | automation | asserted
 - authority_level       standard | elevated | recovery_access
 - authentication_method
 - asserted_by_principal_id?   set when this session's proof came from
                               somewhere other than local credentials
-                              (SSO, and later, a foreign credential)
-- metadata
+- metadata               opaque, never authorized on
 - created_at / expires_at? / last_seen / revoked_at?
 ```
 
-`app_user`/`app_service` (Lighthouse's kinds for "a session belonging to
-another app's user, asserted in") don't translate by name, but the job
-they did — flagging a session whose proof isn't first-party — still
-matters here, so `federated` is proposed as the one kind covering both
-today's SSO case and tomorrow's cross-app case.
+`session_kind = asserted` is the one kind covering both today's SSO case
+and tomorrow's still-deferred cross-app case — named to match
+`asserted_by_principal_id` rather than introducing a second word
+(Lighthouse's own `app_user`/`app_service` kinds did this same job but
+don't translate by name, since they existed specifically for "another
+app's user, asserted in," a relationship this model doesn't have).
+
+**Elevation is session/action-scoped, never a separate principal** —
+`authority_level = elevated` on an existing session, not a second
+principal with more power. `recovery_access` stays reserved vocabulary,
+same treatment as the still-unbuilt credential kinds: the value exists
+so nothing has to be renamed later, but the actual recovery-activation
+mechanism is undesigned and deferred, matching Lighthouse's own current
+state (its recovery flows are design-only too).
+
+**What's deliberately *not* in this record: any notion of a live
+connection.** Per `01-build-order.md`'s Layer 2 table, connection-bound
+sessions are the "Sessions" integration's job (Gatehouse-core + Transit),
+not a field Gatehouse-core's own Session shape carries. An app that
+never uses Transit gets ordinary sessions with nothing missing; one that
+does gets the integration adding a connection reference on top, without
+the base record ever needing to change for it — the structure/
+evaluation/storage split doing exactly what it's for.
 
 ## Context
 
