@@ -217,6 +217,7 @@ differently; see
 | `06-logging-and-observability.md` | Logging as bedrock, operational vs. audit logging, standard trace/span terminology, trace/log aggregation |
 | `07-config-formats-and-templating.md` | Why XML/HCL/TOML split by content shape, HCL as declarative "ensure this exists" templates over the same facade API |
 | `08-repo-scaffolding.md` | The actual directory/module layout enforcing the base/integration boundaries — what's decided now vs. still open |
+| `09-gatehouse-core-model.md` | What Principal/Credential/Grant/Context/Session/Role/Group actually are — what's confirmed vs. loosely proposed |
 
 Config format split, settled and not up for relitigating without a new
 concrete reason: **XML** for document-shaped content (docs, dashboards),
