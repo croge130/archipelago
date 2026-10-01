@@ -32,6 +32,16 @@ correction, not as already settled:
 | Deny effect (deny-always-wins, no graduated specificity) | confirmed |
 | Authority level; minimal PermissionDefinition introduced | confirmed |
 | Generations / freshness (two counters, one invariant) | confirmed |
+| Caches never override revocation | confirmed |
+| No implicit principal creation, narrow mTLS-fingerprint policy exception | confirmed |
+| Devices/hosts are correlation context, not principals | confirmed |
+| Attestation via ownership and/or groups, policy-governed (full mechanics open) | confirmed (partial) |
+| Certificates inform provisioning under policy, never authorize directly | confirmed |
+| Evaluation facade (`Evaluate`/`Require` as the one chokepoint) | confirmed |
+| Three-Identity Model, trimmed authority-source vocabulary | confirmed |
+| Direct-DB-write bypass is an operation fact, not a principal classification | confirmed |
+| Wildcards never include recovery-access permissions | confirmed |
+| Reserved permission-key namespaces (hygiene default, not a security wall) | confirmed |
 
 ## Why no realm, concretely, not just as a slogan
 
@@ -86,10 +96,46 @@ PrincipalRecord
 - created_at / ... 
 ```
 
-## Credential — proposed
+**No implicit principal creation, with one narrow, policy-gated
+exception.** Principals are never created as a side effect of login,
+alias lookup, or app-assertion — creation is always an explicit,
+separately-authorized operation. The one deliberate carve-out: an app
+may opt into auto-provisioning a `service_account` principal on first
+mTLS connection from a specific, already-enrolled certificate — gated by
+policy, and keyed on **subject + fingerprint**, never subject alone. A
+cert's mere existence already represents an explicit authorization event
+(it went through the enrollment ceremony in
+[`05-pki-and-signing.md`](05-pki-and-signing.md)); auto-provisioning on
+first use from *that specific* cert just defers the last step of a
+provisioning flow that already happened explicitly, to first contact.
+Keying on the claimed subject alone instead would reopen the exact
+silent-materialization risk this rule exists to prevent, since it ties
+provisioning to a claim rather than a specific vetted artifact.
 
-*Loosely adapted from Lighthouse §4.2, §8.2, §9–10. Not yet discussed in
-depth; treat every kind name below as a placeholder.*
+**Devices and hosts are correlation context, not principals.** A device
+doesn't hold grants of its own; it's referenced from a Credential or
+Session (and from log/trace Resource attributes — see
+[`06-logging-and-observability.md`](06-logging-and-observability.md))
+purely for correlation — "which device was this," not "what can this
+device do." Anything a device needs to be able to do is a permission
+held by the principal using it, not the device itself.
+
+**Attestation rights — vouching that a principal authenticated, the
+thing `asserted_by_principal_id` on Session records — come from
+two independent paths, not one.** A principal's owner
+(`owner_principal_id`) may attest for it; so may any principal holding
+delegated attestation authority over a group the principal belongs to.
+Neither path is required and both can coexist — a service in a suite
+often needs to attest for principals it doesn't own, which is exactly
+what group-delegation covers and pure ownership doesn't. Which path(s)
+are enabled, and whether ownership alone is trusted at all, is a policy
+decision per Archipelago instance. The full shape — how ownership
+actually works, what a cycle-free structure looks like concretely —
+isn't decided yet; only that both paths exist and policy governs them is.
+
+## Credential — confirmed
+
+*Adapted from Lighthouse §4.2, §8.2, §9–10, §29.*
 
 Lighthouse drew a real, worth-keeping distinction between **how a
 principal first proves who it is** (an authentication *method*) and
@@ -108,6 +154,18 @@ actually mints the credential (a session token) that gets presented
 afterward. Cert-as-credential (the Layer 2 integration with certstore,
 `02-package-boundaries.md`) is a second, independent way a request
 authenticates — a certificate itself, not a token derived from one.
+
+**Certificates identify bindings; they inform decisions, they never
+carry mutable authorization themselves.** A certificate's content (its
+subject) can legitimately influence what gets auto-provisioned (see
+Principal, above) without that being authorization baked into the
+cert — provisioning still produces an ordinary principal with ordinary
+DB-backed grants, evaluated the normal way afterward. Whatever a cert's
+content suggests, local policy is the ceiling: policy can only narrow
+what cert-based provisioning would otherwise produce, never let a
+cert's claim push authority up past what policy allows — the same
+narrowing rule SSO assertion already follows (see the Three-Identity
+Model, below, for exactly where that rule does and doesn't apply).
 
 ### Storage: one table per credential kind, not grouped by shape
 
@@ -146,12 +204,30 @@ falls into exactly three operations (hash-and-compare, decrypt-and-
 compute, or check-a-public-key), and that's a property of Evaluation's
 logic, not a reason to collapse Storage into fewer tables.
 
-**Deferred, reusing the TOTP machinery once it exists:** once an
-encrypted, rotatable-key credential table exists for TOTP, the same
-mechanism generalizes into an app-facing "store my own reversible
-secret" capability — a thinner facade over what's already there, not a
-new subsystem. Deferred because TOTP itself isn't built yet, so there's
-nothing yet to generalize from.
+**Deferred, reusing the TOTP machinery once it exists — and worth
+starting from Lighthouse's own (also never-built) design instead of a
+blank page when that happens.** Once an encrypted, rotatable-key
+credential table exists for TOTP, the same mechanism generalizes into an
+app-facing secrets capability. Lighthouse's own design for this
+(design-only there too, but genuinely thought through) is worth keeping
+as the starting shape:
+
+```text
+metadata access, value read, and value use are separate rights — "use"
+  (the system uses the secret for an approved operation without ever
+  revealing it back) is preferred over "read," and is a real, separate
+  right from it
+discovery rule: no discovery rights -> not found; discovery without
+  action rights -> forbidden (never confirm a secret exists to someone
+  without the right to know that)
+secrets are modeled as ordinary Contexts (an app-defined context type) —
+  reusing the Grant/Context machinery already decided above, not a
+  parallel permission system
+```
+
+Still deferred because TOTP itself isn't built yet, so there's nothing
+yet to generalize from — this just means the eventual generalization
+starts from a better-informed shape instead of reinventing one later.
 
 **Gatehouse-core owns storage for the kinds it implements itself**
 (password, TOTP, passkey, session tokens) — pushing that to the app
@@ -350,10 +426,17 @@ orthogonal — rather than folding elevation into Grant matching — is
 what keeps deny-always-wins valid as the *only* precedence rule Grant
 evaluation needs.
 
+**Wildcards never include recovery-access permissions.** A wildcard
+grant (`myapp.readinglist.*`) structurally excludes any permission whose
+`required_authority_level` is `recovery_access`, no exceptions — cheap
+to decide now, independent of whether recovery access itself is built
+yet.
+
 `recovery_access` stays reserved, not built, same as before.
-`PermissionDefinition`'s fuller shape (Lighthouse also has risk class
-and audit policy here) isn't decided — only the two fields Authority
-level and wildcard matching need a home for are.
+`PermissionDefinition`'s fuller shape (Lighthouse also has risk class,
+audit policy, evaluation path, and break-glass fields here) isn't
+decided — only the two fields Authority level and wildcard matching need
+a home for are.
 
 ## Deny — confirmed, built from day one
 
@@ -436,6 +519,138 @@ rather than three separate bump calls scattered across Grant/Group/Role
 code, is exactly the cheap-now/expensive-later distinction this doc
 exists to get ahead of.
 
+**Caches never override revocation — stated now even though nothing
+caches yet.** Whatever snapshot or fast-path evaluation mechanism
+eventually gets built on top of these generations (Lighthouse's own
+`AuthorizationSnapshotEvaluation` is the shape to look at when that
+happens), a revoked grant, credential, or principal takes effect
+immediately regardless of what any cached decision still claims.
+Writing this down before any caching exists is the point — so a future
+performance optimization can't accidentally violate it by construction.
+
+## Evaluation facade — confirmed
+
+*Adapted from Lighthouse §20.1. Never explicitly stated until now, even
+though nothing decided so far contradicts it.*
+
+Every privileged operation goes through one chokepoint, never a
+scattered set of ad hoc checks at call sites:
+
+```text
+Evaluate(ctx, request) -> Decision
+Require(ctx, request) -> error
+```
+
+`Require` is `Evaluate` plus "return an error if not allowed" — a
+convenience wrapper, not a second evaluator, the same rule facades
+generally follow (see
+[`04-facades-and-ergonomics.md`](04-facades-and-ergonomics.md)).
+Permission semantics live in this one evaluator; nowhere else gets to
+reimplement matching, deny precedence, or authority-level checking on
+its own.
+
+## The Three-Identity Model — confirmed
+
+*Adapted from Lighthouse §22, trimmed, and resolved against this
+conversation's own discussion of direct-DB-write bypass.*
+
+Background and delegated work must never flatten three distinct facts
+into one actor field:
+
+```text
+actor_principal          who performed the work
+requested_by_principal   whose authority requested/authorized it
+authority_source         the artifact/session/delegation/internal
+                         authority justifying it
+```
+
+All three are ordinary principal IDs or typed source references — even
+a fully internal, code-defined operation runs as a real principal with a
+stable ID, never a bare string.
+
+### Authority source vocabulary, trimmed from Lighthouse's nine to six
+
+1. `session` — the ordinary case; actor == requester.
+2. `internal_system` — direct DB write, no other party asked. This *is*
+   the bypass case resolved earlier in this doc's history: bypass isn't
+   a classification on a principal, it's a fact about the operation —
+   writing directly to data you already fully own has no second party
+   to check against. The moment an operation needs to ask another node
+   to act, that request is the checked boundary (ordinary Peer
+   authorization, per `01-build-order.md`'s Layer 2 table); there's no
+   separate "is this really a system principal" question on top of that.
+3. `delegated_authority` — effective authority is the intersection of
+   the requester's current permissions and whatever scope was delegated
+   to the actor; delegation narrows, it never expands; the requester
+   must still hold the permission at execution time, not just when the
+   delegation was granted.
+4. `service_action` — a service acting under its own standing authority,
+   not on anyone's behalf. Matters more here than it did for Lighthouse,
+   given how much more the suite model gets used in this design.
+5. `scheduled_task` — a reference type for job/scheduler-triggered work,
+   even though the scheduler itself is a different subsystem entirely.
+6. `recovery_elevation` — matches the already-reserved `recovery_access`
+   vocabulary; never an ordinary delegation source, never delegable to
+   scheduled work.
+
+Dropped rather than carried forward: Lighthouse's `credential` and
+`live_creator_authority` aren't justified by anything decided yet.
+`system_task_definition` isn't a seventh type — it's an optional
+reference ID attached to an `internal_system` source ("which internal
+task, specifically"), not a parallel option.
+
+### Where "assertion narrows, never expands" does and doesn't apply
+
+That rule is scoped tightly to app-to-app/SSO-style assertion — the
+`session_kind = asserted` case. It is *not* a general claim about what
+any service can do:
+
+1. A service needing elevated authority for specific internal operations
+   isn't "asserting" a different principal — it's `internal_system`
+   direct-write work (above), or the service's own principal legitimately
+   holding the grants it needs. Forcing that into the assertion model
+   would be reaching for the wrong tool.
+2. For a suite using symmetric DB access
+   (`03-multi-instance-and-suites.md`), a service holding real DB
+   credentials has ambient capability no permission check can actually
+   constrain — `Evaluate`/`Require` is a discipline and audit layer at
+   that point, not an absolute enforcement boundary. That's not a flaw;
+   it's the honest cost symmetric access already named as a trade-off
+   against asymmetric/designated-writer access narrowing blast radius.
+   An unqualified "assertion never expands" claim would overstate what
+   permission checks actually guarantee there.
+
+A genuinely unrestricted writer can still choose to route its own
+`internal_system` operations through `Evaluate`/`Require` anyway, purely
+as a self-imposed defense-in-depth setting against its own bugs — a
+config toggle an app opts into, not something the evaluator needs to
+treat as a special case.
+
+### Audit shape
+
+Delegated/background work logs all three identities plus the outcome —
+`actor_principal_id`, `requested_by_principal_id`,
+`authority_source_type` (+ a reference id where one applies), the
+permission/scope/context checked, and the decision — loosely adapted
+from Lighthouse §22.6, not yet pinned to exact field names.
+
+## Permission namespace reservation — confirmed
+
+*Adapted from Lighthouse §15.3, reframed after this conversation's own
+correction of the original framing.*
+
+Reserved prefixes (something like `gatehouse.*`) are blocked by default
+for app-defined permission keys — but as a **hygiene guardrail against
+accidental collision, not a security boundary.** There's no real
+adversary to wall off here: an app defining its own permission keys
+already has full access to its own database, so "protecting" a
+namespace from a *malicious* app defends against a threat that doesn't
+exist in this architecture. What the reservation actually prevents is an
+app unknowingly defining a key that shadows a built-in one and getting a
+confusing bug from it. Because it's a default, not a wall, an app that
+deliberately wants to use a reserved-looking prefix can override it
+explicitly via policy or SDK setup config.
+
 ## What stays explicitly deferred
 
 - **Cross-app / shared-CA credentials.** Vocabulary left open (see
@@ -445,9 +660,19 @@ exists to get ahead of.
 - **Intra-app multi-tenancy.** No first-class concept; an app that needs
   it uses groups and context-scoped grants.
 - **`PermissionDefinition`'s fuller shape.** Only `required_authority_level`
-  and `wildcard_includable` are decided; Lighthouse's risk class and
-  audit policy fields aren't carried forward or rejected, just not
-  addressed yet.
+  and `wildcard_includable` are decided; Lighthouse's risk class, audit
+  policy, evaluation path, and break-glass fields aren't carried forward
+  or rejected, just not addressed yet.
 - **Per-principal/per-group generation granularity.** Staying with one
   global counter each until coarse invalidation is shown to actually
   cost something.
+- **Attestation ownership/group mechanics in full.** Only that both an
+  ownership path and a group-delegation path exist, and that policy
+  governs which are enabled, is decided — the cycle-free structure,
+  reassignment rules, and default trust posture aren't.
+- **Snapshot/fast-path evaluation.** The generation/freshness groundwork
+  exists to make this possible later; no snapshot mechanism itself is
+  designed yet.
+- **The exact denial-reason vocabulary.** Deny and the evaluation facade
+  are confirmed; the specific set of named denial reasons an
+  implementation returns isn't pinned down yet.
