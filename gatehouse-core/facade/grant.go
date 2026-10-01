@@ -16,7 +16,7 @@ import (
 // origin; this never becomes a second way to construct a Grant, just a
 // shortcut for the shape most callers want.
 func GrantPermission(ctx context.Context, writer Writer, subjectType structure.GrantSubjectType, subjectID uuid.UUID, permissionKey string) (structure.Grant, error) {
-	now := time.Now()
+	now := time.Now().Truncate(time.Microsecond) // see facade.EnsurePrincipal's comment on why
 	key := permissionKey
 	g := structure.Grant{
 		GrantID:       uuid.New(),

@@ -32,7 +32,12 @@ func EnsurePrincipal(ctx context.Context, reader Reader, writer Writer, key stri
 		return existing, nil
 	}
 
-	now := time.Now()
+	// Truncated to microsecond precision to match what Postgres's
+	// timestamptz actually stores — otherwise a value returned fresh
+	// on create (full nanosecond + monotonic precision) stops
+	// comparing equal to the same instant read back later, which
+	// strips both.
+	now := time.Now().Truncate(time.Microsecond)
 	p := structure.Principal{
 		PrincipalID: uuid.New(),
 		Key:         key,
