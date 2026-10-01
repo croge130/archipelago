@@ -41,6 +41,50 @@ parameter-level (freely mixable) and which are policy-level (app-wide,
 pick one) — the doc for a facade is incomplete without that distinction
 stated explicitly.
 
+## A future pluggable evaluator: shape constraints, not a design yet
+
+Gatehouse-core is optional at zero cost today simply by not importing
+it — it's its own module. The harder case is wanting the *rest* of the
+SDK (Transit, certstore, endpoint registration) without being locked
+into Gatehouse-core's specific evaluator. Nothing forces that question
+yet, because nothing outside Gatehouse-core calls `Evaluate` — but
+three constraints are worth holding onto for whenever something does,
+so the eventual design doesn't have to be re-derived from scratch:
+
+1. **The consumer declares its own thin interface at its own
+   boundary** — the same rule already applied twice (`evaluation.Store`,
+   `facade.Writer`). A future integration that needs "the evaluator"
+   defines something like `Evaluate(subject, action, resource) ->
+   Decision` for itself; Gatehouse-core's real evaluator is wired in
+   through a one-function adapter, never imported directly. Swapping
+   evaluators later means swapping which adapter is wired in, never a
+   rewrite of the integration and never two parallel SDKs.
+2. **`Decision` must stay rich — a bare `bool` would be a regression,**
+   not a simplification. Lighthouse's own `AuthorizationDecision` earns
+   its explainability from ~30 named, typed, Lighthouse-specific
+   fields on one concrete struct, which is exactly right for
+   Gatehouse-core's *own* decision type (free to keep growing fields
+   the same way) but can't be copied wholesale into a generic
+   interface — a foreign evaluator wouldn't know what `WildcardMatch`
+   means. The generic shape's answer is an open, evaluator-specific
+   detail bag (`Reason string` + `Details map[string]any` or similar)
+   alongside `Allowed` — rich by construction, generic only in not
+   assuming Grants/Roles/Context are the only possible backing model.
+   The interface's return type needs to be an interface, not a
+   concrete struct, so a caller that knows it's talking to
+   Gatehouse-core can still type-assert down to the full concrete type
+   (the same pattern as `error` + `errors.As`) rather than having the
+   extra fields silently truncated by Go's own assignment semantics.
+3. **A decision's correlation ID is a log attribute, not a database
+   row.** Riding on the trace/span machinery already in
+   [`06-logging-and-observability.md`](06-logging-and-observability.md)
+   costs nothing per check; a dedicated decisions table would
+   reintroduce exactly the per-check DB write the generation/freshness
+   work exists to avoid. Durable storage stays reserved for the
+   selective audit record a real decision earns, per that same doc's
+   operational-vs-audit-logging split — never a blanket table for every
+   check.
+
 ## Endpoint self-advertisement, from the beginning
 
 Lighthouse's `adminTokenMessageTypes` — a hand-maintained list of which
