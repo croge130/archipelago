@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"time"
 
@@ -13,6 +14,20 @@ import (
 	"github.com/smallstep/certificates/authority"
 	"github.com/smallstep/certificates/authority/provisioner"
 )
+
+// ParseCSR parses an Enrollment's stored CSR bytes, accepting either
+// PEM (what a CLI/API submission typically carries) or raw DER.
+func ParseCSR(raw []byte) (*x509.CertificateRequest, error) {
+	der := raw
+	if block, _ := pem.Decode(raw); block != nil {
+		der = block.Bytes
+	}
+	csr, err := x509.ParseCertificateRequest(der)
+	if err != nil {
+		return nil, fmt.Errorf("evaluation: parse csr: %w", err)
+	}
+	return csr, nil
+}
 
 // CA is the embedded certificate authority: smallstep/certificates'
 // provisioner-based CSR/signing logic running as a library inside our

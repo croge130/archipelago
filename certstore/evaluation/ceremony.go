@@ -15,7 +15,15 @@ import (
 // business owning.
 type Policy struct {
 	AutoApprove map[structure.EnrollmentPurpose]bool
+
+	// Validity maps a purpose to how long a certificate issued for it
+	// should remain valid. A purpose missing here, or mapped to a
+	// non-positive duration, falls back to DefaultValidity.
+	Validity map[structure.EnrollmentPurpose]time.Duration
 }
+
+// DefaultValidity is used for any purpose Policy.Validity doesn't name.
+const DefaultValidity = 24 * time.Hour
 
 // RequiresApproval reports whether purpose needs an operator decision
 // before signing — true for any purpose not explicitly listed, so an
@@ -23,6 +31,15 @@ type Policy struct {
 // path rather than silently auto-approving.
 func (p Policy) RequiresApproval(purpose structure.EnrollmentPurpose) bool {
 	return !p.AutoApprove[purpose]
+}
+
+// ValidityFor returns how long a certificate issued for purpose should
+// remain valid.
+func (p Policy) ValidityFor(purpose structure.EnrollmentPurpose) time.Duration {
+	if d, ok := p.Validity[purpose]; ok && d > 0 {
+		return d
+	}
+	return DefaultValidity
 }
 
 // Confirm transitions a pending Enrollment to confirmed. confirmedBy is
