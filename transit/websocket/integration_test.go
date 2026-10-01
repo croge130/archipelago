@@ -31,7 +31,7 @@ func dialPair(t *testing.T) (server, client *Conn, cleanup func()) {
 	ctx, cancel := withTimeout(t)
 	defer cancel()
 
-	clientSession, err := Dial(ctx, wsURL)
+	clientSession, err := Dial(ctx, wsURL, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
