@@ -7,6 +7,7 @@ use (
 	./gatehouse-core
 	./logging
 	./policy
+	./transit
 	./typeconstraints
 	./typedvalue
 	./wire
