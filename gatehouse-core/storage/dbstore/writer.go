@@ -44,6 +44,49 @@ func (w *PostgresWriter) CreatePrincipal(ctx context.Context, p structure.Princi
 	return nil
 }
 
+// CreateMTLSCredential inserts both the common Credential row and its
+// mtls_certificate detail row atomically — no secret storage at all,
+// per the model doc: cred_fingerprint is a reference into certstore's
+// own records, never a copy of the certificate or key. Does not bump
+// principal_grant_generation: a credential is authentication
+// material, orthogonal to what a principal is authorized for, which
+// only grants/roles/groups change.
+func (w *PostgresWriter) CreateMTLSCredential(ctx context.Context, cred structure.Credential, detail structure.MTLSCertCredDetail) error {
+	if err := cred.Validate(); err != nil {
+		return err
+	}
+	if err := detail.Validate(); err != nil {
+		return err
+	}
+	if cred.CredentialID != detail.CredentialID {
+		return fmt.Errorf("dbstore: create mtls credential: Credential.CredentialID and MTLSCertCredDetail.CredentialID must match")
+	}
+	if cred.Kind != structure.CredentialKindMTLSCertificate {
+		return fmt.Errorf("dbstore: create mtls credential: Credential.Kind must be %q, got %q", structure.CredentialKindMTLSCertificate, cred.Kind)
+	}
+	tx, err := w.pool.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("dbstore: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO gatehouse_credentials (credential_id, principal_id, kind, status, created_at, revoked_at)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		uuidToText(cred.CredentialID), uuidToText(cred.PrincipalID), string(cred.Kind), string(cred.Status), cred.CreatedAt, cred.RevokedAt,
+	); err != nil {
+		return fmt.Errorf("dbstore: create mtls credential: %w", err)
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO gatehouse_mtls_certificate_credentials (credential_id, cert_fingerprint)
+		 VALUES ($1, $2)`,
+		uuidToText(detail.CredentialID), detail.CertFingerprint,
+	); err != nil {
+		return fmt.Errorf("dbstore: create mtls credential: %w", err)
+	}
+	return tx.Commit(ctx)
+}
+
 func (w *PostgresWriter) RegisterPermissionDefinition(ctx context.Context, def structure.PermissionDefinition) error {
 	if err := def.Validate(); err != nil {
 		return err

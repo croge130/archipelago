@@ -8,6 +8,7 @@ package facade
 
 import (
 	"context"
+	"errors"
 	"os"
 	"testing"
 
@@ -71,6 +72,50 @@ func TestEnsurePrincipalCreatesOnce(t *testing.T) {
 
 	if first.PrincipalID != second.PrincipalID {
 		t.Fatalf("expected the second EnsurePrincipal call to return the same principal, got %s and %s", first.PrincipalID, second.PrincipalID)
+	}
+}
+
+func TestEnsureMTLSCredentialIdempotent(t *testing.T) {
+	reader, writer := setupFacadeTest(t)
+	ctx := context.Background()
+
+	p, err := EnsurePrincipal(ctx, reader, writer, "service.gamebridge", structure.PrincipalTypeServiceAccount)
+	if err != nil {
+		t.Fatalf("EnsurePrincipal: %v", err)
+	}
+
+	first, err := EnsureMTLSCredential(ctx, reader, writer, p.PrincipalID, "sha256:abcd1234")
+	if err != nil {
+		t.Fatalf("EnsureMTLSCredential (first): %v", err)
+	}
+	second, err := EnsureMTLSCredential(ctx, reader, writer, p.PrincipalID, "sha256:abcd1234")
+	if err != nil {
+		t.Fatalf("EnsureMTLSCredential (second): %v", err)
+	}
+	if first.CredentialID != second.CredentialID {
+		t.Fatal("expected the second EnsureMTLSCredential call to return the same credential")
+	}
+}
+
+func TestEnsureMTLSCredentialConflict(t *testing.T) {
+	reader, writer := setupFacadeTest(t)
+	ctx := context.Background()
+
+	a, err := EnsurePrincipal(ctx, reader, writer, "service.gamebridge", structure.PrincipalTypeServiceAccount)
+	if err != nil {
+		t.Fatalf("EnsurePrincipal (a): %v", err)
+	}
+	b, err := EnsurePrincipal(ctx, reader, writer, "service.torrent", structure.PrincipalTypeServiceAccount)
+	if err != nil {
+		t.Fatalf("EnsurePrincipal (b): %v", err)
+	}
+
+	if _, err := EnsureMTLSCredential(ctx, reader, writer, a.PrincipalID, "sha256:abcd1234"); err != nil {
+		t.Fatalf("EnsureMTLSCredential (a): %v", err)
+	}
+	_, err = EnsureMTLSCredential(ctx, reader, writer, b.PrincipalID, "sha256:abcd1234")
+	if !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict binding the same fingerprint to a different principal, got: %v", err)
 	}
 }
 

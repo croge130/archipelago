@@ -60,6 +60,41 @@ func (r *PostgresReader) GetPrincipalByKey(ctx context.Context, key string) (str
 	return p, true, nil
 }
 
+// GetCredentialByMTLSFingerprint resolves a verified mTLS peer's
+// certificate fingerprint straight to the Credential and its detail
+// row — peer authorization's primary lookup, per
+// 01-build-order.md's Layer 2 table. Not part of evaluation.Store:
+// resolving a fingerprint to a principal is the peerauth integration's
+// job, Evaluate itself works from a PrincipalID.
+func (r *PostgresReader) GetCredentialByMTLSFingerprint(ctx context.Context, fingerprint string) (structure.Credential, structure.MTLSCertCredDetail, bool, error) {
+	var cred structure.Credential
+	var detail structure.MTLSCertCredDetail
+	var credentialIDText, principalIDText, kind, status string
+	err := r.pool.QueryRow(ctx,
+		`SELECT c.credential_id, c.principal_id, c.kind, c.status, c.created_at, c.revoked_at, m.cert_fingerprint
+		 FROM gatehouse_mtls_certificate_credentials m
+		 JOIN gatehouse_credentials c ON c.credential_id = m.credential_id
+		 WHERE m.cert_fingerprint = $1`,
+		fingerprint,
+	).Scan(&credentialIDText, &principalIDText, &kind, &status, &cred.CreatedAt, &cred.RevokedAt, &detail.CertFingerprint)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return structure.Credential{}, structure.MTLSCertCredDetail{}, false, nil
+		}
+		return structure.Credential{}, structure.MTLSCertCredDetail{}, false, fmt.Errorf("dbstore: get credential by mtls fingerprint: %w", err)
+	}
+	if cred.CredentialID, err = parseUUID(credentialIDText); err != nil {
+		return structure.Credential{}, structure.MTLSCertCredDetail{}, false, fmt.Errorf("dbstore: parse credential_id: %w", err)
+	}
+	if cred.PrincipalID, err = parseUUID(principalIDText); err != nil {
+		return structure.Credential{}, structure.MTLSCertCredDetail{}, false, fmt.Errorf("dbstore: parse principal_id: %w", err)
+	}
+	cred.Kind = structure.CredentialKind(kind)
+	cred.Status = structure.CredentialStatus(status)
+	detail.CredentialID = cred.CredentialID
+	return cred, detail, true, nil
+}
+
 func (r *PostgresReader) GetPermissionDefinition(ctx context.Context, key string) (structure.PermissionDefinition, bool, error) {
 	var def structure.PermissionDefinition
 	err := r.pool.QueryRow(ctx,

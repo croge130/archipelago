@@ -14,6 +14,7 @@ type Reader interface {
 	evaluation.Store
 	GetPrincipalByKey(ctx context.Context, key string) (structure.Principal, bool, error)
 	GetGeneration(ctx context.Context) (structure.AuthorityGeneration, error)
+	GetCredentialByMTLSFingerprint(ctx context.Context, fingerprint string) (structure.Credential, structure.MTLSCertCredDetail, bool, error)
 }
 
 // Writer is every mutation the facade drives. Moved here from
@@ -30,4 +31,5 @@ type Writer interface {
 	AddRolePermission(ctx context.Context, p structure.RolePermission) error
 	CreateGroup(ctx context.Context, g structure.Group) error
 	AddGroupMember(ctx context.Context, m structure.GroupMembership) error
+	CreateMTLSCredential(ctx context.Context, cred structure.Credential, detail structure.MTLSCertCredDetail) error
 }

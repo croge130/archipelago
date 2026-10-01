@@ -99,6 +99,69 @@ func TestDBStoreCreatePrincipalAndReadBack(t *testing.T) {
 
 func strPtrDB(s string) *string { return &s }
 
+func TestDBStoreCreateMTLSCredentialAndGetByFingerprint(t *testing.T) {
+	reader, writer := setupTestStore(t)
+	ctx := context.Background()
+
+	principal := testPrincipal()
+	if err := writer.CreatePrincipal(ctx, principal); err != nil {
+		t.Fatalf("CreatePrincipal: %v", err)
+	}
+
+	now := time.Now()
+	cred := structure.Credential{
+		CredentialID: uuid.New(),
+		PrincipalID:  principal.PrincipalID,
+		Kind:         structure.CredentialKindMTLSCertificate,
+		Status:       structure.CredentialStatusActive,
+		CreatedAt:    now,
+	}
+	detail := structure.MTLSCertCredDetail{CredentialID: cred.CredentialID, CertFingerprint: "sha256:abcd1234"}
+	if err := writer.CreateMTLSCredential(ctx, cred, detail); err != nil {
+		t.Fatalf("CreateMTLSCredential: %v", err)
+	}
+
+	gotCred, gotDetail, found, err := reader.GetCredentialByMTLSFingerprint(ctx, "sha256:abcd1234")
+	if err != nil {
+		t.Fatalf("GetCredentialByMTLSFingerprint: %v", err)
+	}
+	if !found || gotCred.PrincipalID != principal.PrincipalID || gotCred.Kind != structure.CredentialKindMTLSCertificate {
+		t.Fatalf("GetCredentialByMTLSFingerprint = %+v, found=%v", gotCred, found)
+	}
+	if gotDetail.CertFingerprint != "sha256:abcd1234" {
+		t.Fatalf("gotDetail.CertFingerprint = %q, want sha256:abcd1234", gotDetail.CertFingerprint)
+	}
+}
+
+func TestDBStoreGetCredentialByMTLSFingerprintNotFound(t *testing.T) {
+	reader, _ := setupTestStore(t)
+	_, _, found, err := reader.GetCredentialByMTLSFingerprint(context.Background(), "sha256:never-registered")
+	if err != nil {
+		t.Fatalf("GetCredentialByMTLSFingerprint: %v", err)
+	}
+	if found {
+		t.Fatal("expected not found for a never-registered fingerprint")
+	}
+}
+
+func TestDBStoreCreateMTLSCredentialRejectsWrongKind(t *testing.T) {
+	_, writer := setupTestStore(t)
+	ctx := context.Background()
+	principal := testPrincipal()
+	if err := writer.CreatePrincipal(ctx, principal); err != nil {
+		t.Fatalf("CreatePrincipal: %v", err)
+	}
+
+	cred := structure.Credential{
+		CredentialID: uuid.New(), PrincipalID: principal.PrincipalID,
+		Kind: structure.CredentialKindSessionToken, Status: structure.CredentialStatusActive, CreatedAt: time.Now(),
+	}
+	detail := structure.MTLSCertCredDetail{CredentialID: cred.CredentialID, CertFingerprint: "sha256:abcd1234"}
+	if err := writer.CreateMTLSCredential(ctx, cred, detail); err == nil {
+		t.Fatal("expected an error creating an mtls credential with Kind=session_token")
+	}
+}
+
 func TestDBStoreEvaluateExactAllowAgainstRealPostgres(t *testing.T) {
 	reader, writer := setupTestStore(t)
 	ctx := context.Background()
