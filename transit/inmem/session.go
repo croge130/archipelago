@@ -78,6 +78,22 @@ func (s *Session) Push(ctx context.Context, msg wire.Message) error {
 }
 
 func (s *Session) send(ctx context.Context, msg wire.Message) error {
+	// A buffered incoming channel with room left can still accept a
+	// send even after closed fires — select has no priority among
+	// simultaneously-ready cases — so check closed first,
+	// non-blocking, the same defensive-pre-check pattern Channel.Send
+	// already uses. This doesn't close the race for a send that's
+	// genuinely concurrent with Close (inherently best-effort, same
+	// as a real network connection dropping mid-write), only for the
+	// ordinary "already closed before this call" case, which is the
+	// case that actually needs to be reliable.
+	select {
+	case <-s.closed:
+		return transit.ErrSessionClosed
+	case <-s.peer.closed:
+		return transit.ErrSessionClosed
+	default:
+	}
 	select {
 	case s.peer.incoming <- msg:
 		return nil

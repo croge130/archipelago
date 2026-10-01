@@ -8,6 +8,7 @@ use (
 	./logging
 	./policy
 	./transit
+	./transit/websocket
 	./typeconstraints
 	./typedvalue
 	./wire
