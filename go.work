@@ -6,6 +6,7 @@ use (
 	./db
 	./gatehouse-core
 	./logging
+	./policy
 	./typeconstraints
 	./typedvalue
 )
