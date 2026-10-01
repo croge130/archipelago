@@ -7,6 +7,7 @@ use (
 	./gatehouse-core
 	./logging
 	./mtls
+	./peerauth
 	./policy
 	./transit
 	./transit/websocket
