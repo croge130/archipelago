@@ -142,7 +142,7 @@ func TestSubmitEnrollmentAutoApproves(t *testing.T) {
 		structure.EnrollmentPurposeMTLSPeer: true,
 	}}
 
-	e, cert, err := SubmitEnrollment(ctx, writer, ca, policy, structure.EnrollmentPurposeMTLSPeer, "service:gamebridge", testCSR(t, "service:gamebridge"), "", nil)
+	e, cert, chain, err := SubmitEnrollment(ctx, writer, ca, policy, structure.EnrollmentPurposeMTLSPeer, "service:gamebridge", testCSR(t, "service:gamebridge"), "", nil)
 	if err != nil {
 		t.Fatalf("SubmitEnrollment: %v", err)
 	}
@@ -151,6 +151,9 @@ func TestSubmitEnrollmentAutoApproves(t *testing.T) {
 	}
 	if cert == nil {
 		t.Fatal("expected a signed cert for an auto-approved enrollment")
+	}
+	if len(chain) == 0 || chain[0].SerialNumber.Text(16) != cert.SerialNumber {
+		t.Fatalf("expected the returned chain's leaf to match the persisted Cert record, got chain=%v cert=%+v", chain, cert)
 	}
 
 	got, found, err := reader.GetCert(ctx, cert.SerialNumber)
@@ -167,15 +170,15 @@ func TestSubmitEnrollmentRequiresApproval(t *testing.T) {
 	ctx := context.Background()
 	policy := evaluation.Policy{} // nothing auto-approved
 
-	e, cert, err := SubmitEnrollment(ctx, writer, ca, policy, structure.EnrollmentPurposeAdminKey, "operator:christian", testCSR(t, "operator:christian"), "", nil)
+	e, cert, chain, err := SubmitEnrollment(ctx, writer, ca, policy, structure.EnrollmentPurposeAdminKey, "operator:christian", testCSR(t, "operator:christian"), "", nil)
 	if err != nil {
 		t.Fatalf("SubmitEnrollment: %v", err)
 	}
 	if e.Status != structure.EnrollmentStatusPending {
 		t.Fatalf("expected a not-auto-approved enrollment to stay pending, got %v", e.Status)
 	}
-	if cert != nil {
-		t.Fatal("expected no cert signed before an operator confirms")
+	if cert != nil || chain != nil {
+		t.Fatal("expected no cert or chain signed before an operator confirms")
 	}
 }
 
@@ -184,12 +187,12 @@ func TestConfirmEnrollmentSignsCert(t *testing.T) {
 	ctx := context.Background()
 	policy := evaluation.Policy{}
 
-	pending, _, err := SubmitEnrollment(ctx, writer, ca, policy, structure.EnrollmentPurposeAdminKey, "operator:christian", testCSR(t, "operator:christian"), "", nil)
+	pending, _, _, err := SubmitEnrollment(ctx, writer, ca, policy, structure.EnrollmentPurposeAdminKey, "operator:christian", testCSR(t, "operator:christian"), "", nil)
 	if err != nil {
 		t.Fatalf("SubmitEnrollment: %v", err)
 	}
 
-	confirmed, cert, err := ConfirmEnrollment(ctx, reader, writer, ca, policy, pending.EnrollmentID, "operator:christian")
+	confirmed, cert, chain, err := ConfirmEnrollment(ctx, reader, writer, ca, policy, pending.EnrollmentID, "operator:christian")
 	if err != nil {
 		t.Fatalf("ConfirmEnrollment: %v", err)
 	}
@@ -199,6 +202,9 @@ func TestConfirmEnrollmentSignsCert(t *testing.T) {
 	if cert.Status != structure.CertStatusActive {
 		t.Fatalf("unexpected cert: %+v", cert)
 	}
+	if len(chain) == 0 {
+		t.Fatal("expected ConfirmEnrollment to return the real signed chain, not just the Cert record")
+	}
 }
 
 func TestRejectEnrollment(t *testing.T) {
@@ -206,7 +212,7 @@ func TestRejectEnrollment(t *testing.T) {
 	ctx := context.Background()
 	policy := evaluation.Policy{}
 
-	pending, _, err := SubmitEnrollment(ctx, writer, ca, policy, structure.EnrollmentPurposeAdminKey, "operator:christian", testCSR(t, "operator:christian"), "", nil)
+	pending, _, _, err := SubmitEnrollment(ctx, writer, ca, policy, structure.EnrollmentPurposeAdminKey, "operator:christian", testCSR(t, "operator:christian"), "", nil)
 	if err != nil {
 		t.Fatalf("SubmitEnrollment: %v", err)
 	}
@@ -219,7 +225,7 @@ func TestRejectEnrollment(t *testing.T) {
 		t.Fatalf("expected rejected status, got %v", rejected.Status)
 	}
 
-	if _, _, err := ConfirmEnrollment(ctx, reader, writer, ca, policy, pending.EnrollmentID, "operator:christian"); err == nil {
+	if _, _, _, err := ConfirmEnrollment(ctx, reader, writer, ca, policy, pending.EnrollmentID, "operator:christian"); err == nil {
 		t.Fatal("expected confirming an already-rejected enrollment to fail")
 	}
 }
@@ -231,7 +237,7 @@ func TestRevokeCert(t *testing.T) {
 		structure.EnrollmentPurposeMTLSPeer: true,
 	}}
 
-	_, cert, err := SubmitEnrollment(ctx, writer, ca, policy, structure.EnrollmentPurposeMTLSPeer, "service:gamebridge", testCSR(t, "service:gamebridge"), "", nil)
+	_, cert, _, err := SubmitEnrollment(ctx, writer, ca, policy, structure.EnrollmentPurposeMTLSPeer, "service:gamebridge", testCSR(t, "service:gamebridge"), "", nil)
 	if err != nil {
 		t.Fatalf("SubmitEnrollment: %v", err)
 	}
