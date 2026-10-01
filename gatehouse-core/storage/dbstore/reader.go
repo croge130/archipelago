@@ -27,6 +27,39 @@ func NewPostgresReader(pool *pgxpool.Pool) *PostgresReader {
 	return &PostgresReader{pool: pool}
 }
 
+// GetPrincipalByKey looks up a principal by its stable, human-oriented
+// key. Not part of evaluation.Store — Evaluate works from a
+// PrincipalID, never a key — but needed by the facade's EnsurePrincipal
+// to make "ensure" genuinely idempotent rather than erroring on a
+// second call for the same key.
+func (r *PostgresReader) GetPrincipalByKey(ctx context.Context, key string) (structure.Principal, bool, error) {
+	var p structure.Principal
+	var principalIDText string
+	var typ string
+	var ownerText *string
+	var metadata []byte
+	err := r.pool.QueryRow(ctx,
+		`SELECT principal_id, key, display_name, type, owner_principal_id, metadata, created_at, updated_at
+		 FROM gatehouse_principals WHERE key = $1`,
+		key,
+	).Scan(&principalIDText, &p.Key, &p.DisplayName, &typ, &ownerText, &metadata, &p.CreatedAt, &p.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return structure.Principal{}, false, nil
+		}
+		return structure.Principal{}, false, fmt.Errorf("dbstore: get principal by key: %w", err)
+	}
+	if p.PrincipalID, err = parseUUID(principalIDText); err != nil {
+		return structure.Principal{}, false, fmt.Errorf("dbstore: parse principal_id: %w", err)
+	}
+	if p.OwnerPrincipalID, err = parseNullableUUID(ownerText); err != nil {
+		return structure.Principal{}, false, fmt.Errorf("dbstore: parse owner_principal_id: %w", err)
+	}
+	p.Type = structure.PrincipalType(typ)
+	p.Metadata = metadata
+	return p, true, nil
+}
+
 func (r *PostgresReader) GetPermissionDefinition(ctx context.Context, key string) (structure.PermissionDefinition, bool, error) {
 	var def structure.PermissionDefinition
 	err := r.pool.QueryRow(ctx,

@@ -10,25 +10,16 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Writer is every mutation Gatehouse-core's data needs, as its own
-// interface — separate from Store (the read side Evaluate depends on)
-// on purpose. Reads and writes were never going to need to change
-// together: a future asymmetric topology swaps in a Writer that routes
-// through a designated writer node while PostgresReader above keeps
-// reading directly, per docs/architecture/03-multi-instance-and-suites.md.
-// Revoke/update/delete operations aren't included yet — this is enough
-// to populate and exercise real data, not the full CRUD surface.
-type Writer interface {
-	CreatePrincipal(ctx context.Context, p structure.Principal) error
-	RegisterPermissionDefinition(ctx context.Context, def structure.PermissionDefinition) error
-	CreateGrant(ctx context.Context, g structure.Grant) error
-	CreateRole(ctx context.Context, r structure.Role) error
-	AddRolePermission(ctx context.Context, p structure.RolePermission) error
-	CreateGroup(ctx context.Context, g structure.Group) error
-	AddGroupMember(ctx context.Context, m structure.GroupMembership) error
-}
-
-// PostgresWriter implements Writer directly against Postgres.
+// PostgresWriter implements facade.Writer directly against Postgres.
+// The Writer interface itself is deliberately NOT declared here —
+// it's declared in facade, the package that actually consumes it,
+// mirroring exactly how evaluation declares Store rather than dbstore
+// declaring it. Declaring Writer in this package would mean any future
+// alternative implementation (one that routes through a designated
+// writer node for an asymmetric topology) has to import dbstore just
+// to reference the interface type, pulling in pgx and everything else
+// Postgres-specific along with it — precisely the coupling the
+// structure/evaluation/storage split exists to avoid.
 type PostgresWriter struct {
 	pool *pgxpool.Pool
 }

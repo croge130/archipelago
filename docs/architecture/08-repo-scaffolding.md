@@ -162,3 +162,21 @@ The `go list`/`go-arch-lint` check named in
 concretely, that no base module's `go.mod` ever gains a `require` line
 for another base module, and that only `integrations/*` and `sdk` import
 more than one base at a time.
+
+## DB-backed tests across a module's packages: run serially
+
+`go test ./...` runs each package's test binary as its own process, and
+different packages' binaries run *concurrently* with each other by
+default — fine when nothing shares state, not fine when multiple
+packages' integration tests point at the same real test database.
+Gatehouse-core's `evaluation`, `storage/dbstore`, and `facade` packages
+all exercise the same `ARCHIPELAGO_TEST_DATABASE_URL` instance, and
+running them in parallel produces exactly the failure this sentence is
+here to prevent being re-diagnosed: two packages' tests racing to
+`TRUNCATE` and re-insert the same row, surfacing as a spurious unique-
+constraint violation that looks like a logic bug and isn't one. Lighthouse's
+own `AGENTS.md` names the identical root cause for its own DB-backed test
+packages (there, a schema-provisioning deadlock; here, a data race —
+same shared-database-under-parallel-test-binaries cause). Run
+`go test -p 1 ./...` whenever a module has more than one package with
+DB-backed tests, the same fix for the same reason.
