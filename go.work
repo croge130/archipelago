@@ -6,6 +6,7 @@ use (
 	./db
 	./gatehouse-core
 	./logging
+	./mtls
 	./policy
 	./transit
 	./transit/websocket
