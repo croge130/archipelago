@@ -71,7 +71,7 @@ individually useful with nothing else in this document existing yet.
 | **Gatehouse-core**¹ | Principals, credentials, grants, local authority evaluation, password/token auth | DB only |
 | **Policy** | Policy definitions/instances/contexts, resolution, generation-based caching — serves config and security policy as one mechanism, see [`10-typedvalue-and-policy-model.md`](10-typedvalue-and-policy-model.md) | DB + typedvalue + typeconstraints |
 | **Cert-store / PKI** | CSR handling, CA signing, enrollment records | DB only (+ eventually a `Signer` backend — vTPM/HSM/YubiKey, decided later, swappable) |
-| **Transit (raw)** | WT/WS backends, delivery classes, byte-level peer identity extraction (`PeerIdentity()`) | Nothing — moving bytes between two processes doesn't need a DB, Gatehouse, or certs |
+| **Transit (raw)** | WT/WS backends, delivery classes, byte-level peer identity extraction (`PeerIdentity()`) — decomposes into `wire` (shared envelope model) + `transit` (Session/Channel/Backend interfaces and backends), see [`11-transit-model.md`](11-transit-model.md) | Nothing — moving bytes between two processes doesn't need a DB, Gatehouse, or certs |
 | **Alias** | Table + name → opaque target value, with its own lifecycle (active/released), never load-bearing | DB only |
 
 Transit's `PeerIdentity()` extraction is pure crypto against whatever cert
