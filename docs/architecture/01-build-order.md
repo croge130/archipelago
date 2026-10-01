@@ -54,6 +54,13 @@ just early, the standard trace/span terminology adopted instead of
 Lighthouse's own ad hoc vocabulary, and how Transit's propagation
 envelope carries correlation data for free.
 
+**typedvalue.** No dependencies — pure data and logic, no DB, usable by
+any app for any practical quantity. **typeconstraints** sits next to it,
+depending one-way on typedvalue only (still no DB). Both come first for
+the same reason Logging does: Policy is built on them, not the other way
+around. See [`10-typedvalue-and-policy-model.md`](10-typedvalue-and-policy-model.md)
+for the full model.
+
 ## Layer 1 — independent bases
 
 These five do not depend on each other. Each is buildable, testable, and
@@ -62,7 +69,7 @@ individually useful with nothing else in this document existing yet.
 | Base | What it is | Needs |
 |---|---|---|
 | **Gatehouse-core**¹ | Principals, credentials, grants, local authority evaluation, password/token auth | DB only |
-| **Policy** | Policy definitions/instances/contexts, resolution, generation-based caching | DB only |
+| **Policy** | Policy definitions/instances/contexts, resolution, generation-based caching — serves config and security policy as one mechanism, see [`10-typedvalue-and-policy-model.md`](10-typedvalue-and-policy-model.md) | DB + typedvalue + typeconstraints |
 | **Cert-store / PKI** | CSR handling, CA signing, enrollment records | DB only (+ eventually a `Signer` backend — vTPM/HSM/YubiKey, decided later, swappable) |
 | **Transit (raw)** | WT/WS backends, delivery classes, byte-level peer identity extraction (`PeerIdentity()`) | Nothing — moving bytes between two processes doesn't need a DB, Gatehouse, or certs |
 | **Alias** | Table + name → opaque target value, with its own lifecycle (active/released), never load-bearing | DB only |
