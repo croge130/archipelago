@@ -149,6 +149,16 @@ func (g Grant) Validate() error {
 	if !g.Effect.Valid() {
 		return fmt.Errorf("structure: grant: invalid Effect %q", g.Effect)
 	}
+	// A role-target grant's own Effect has no independent meaning: the
+	// role's RolePermission entries already carry their own effects,
+	// and a deny here would be ambiguous (deny the whole role? deny
+	// just what it would have allowed?) rather than resolved. Rather
+	// than pick an arbitrary answer, this is disallowed outright —
+	// Evaluation always expands a role-target grant using the role's
+	// own entries as-is.
+	if g.TargetType == GrantTargetTypeRole && g.Effect != GrantEffectAllow {
+		return fmt.Errorf("structure: grant: a role-target grant's Effect must be allow; the role's own RolePermission entries carry the real effects")
+	}
 	if !g.Status.Valid() {
 		return fmt.Errorf("structure: grant: invalid Status %q", g.Status)
 	}

@@ -53,12 +53,30 @@ func TestGrantValidateRoleTarget(t *testing.T) {
 		TargetType:  GrantTargetTypeRole,
 		RoleID:      &roleID,
 		Scope:       GrantScopeGlobal,
-		Effect:      GrantEffectDeny,
+		Effect:      GrantEffectAllow,
 		Status:      GrantStatusActive,
 		Origin:      GrantOriginProvisioned,
 	}
 	if err := g.Validate(); err != nil {
 		t.Fatalf("expected a valid role-target grant to validate, got: %v", err)
+	}
+}
+
+func TestGrantValidateRejectsDenyEffectOnRoleTarget(t *testing.T) {
+	roleID := uuid.New()
+	g := Grant{
+		GrantID:     uuid.New(),
+		SubjectType: GrantSubjectTypeGroup,
+		SubjectID:   uuid.New(),
+		TargetType:  GrantTargetTypeRole,
+		RoleID:      &roleID,
+		Scope:       GrantScopeGlobal,
+		Effect:      GrantEffectDeny,
+		Status:      GrantStatusActive,
+		Origin:      GrantOriginProvisioned,
+	}
+	if err := g.Validate(); err == nil {
+		t.Fatal("expected a role-target grant with Effect=deny to be rejected — the role's own RolePermission entries carry the real effects")
 	}
 }
 
