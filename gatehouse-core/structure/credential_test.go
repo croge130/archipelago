@@ -36,8 +36,8 @@ func TestCredentialValidateRejectsInvalidStatus(t *testing.T) {
 	}
 }
 
-func TestPasswordCredentialDetailValidate(t *testing.T) {
-	d := PasswordCredentialDetail{
+func TestPasswordCredDetailValidate(t *testing.T) {
+	d := PasswordCredDetail{
 		CredentialID:  uuid.New(),
 		HashAlgorithm: "argon2id",
 		Hash:          []byte("not-a-real-hash"),
@@ -52,8 +52,8 @@ func TestPasswordCredentialDetailValidate(t *testing.T) {
 	}
 }
 
-func TestTokenCredentialDetailValidate(t *testing.T) {
-	d := TokenCredentialDetail{
+func TestTokenCredDetailValidate(t *testing.T) {
+	d := TokenCredDetail{
 		CredentialID: uuid.New(),
 		Hash:         []byte("fast-hash"),
 		Purpose:      "session",
@@ -67,8 +67,8 @@ func TestTokenCredentialDetailValidate(t *testing.T) {
 	}
 }
 
-func TestTOTPCredentialDetailValidate(t *testing.T) {
-	d := TOTPCredentialDetail{
+func TestTOTPCredDetailValidate(t *testing.T) {
+	d := TOTPCredDetail{
 		CredentialID:    uuid.New(),
 		EncryptedSecret: []byte("ciphertext"),
 		KeyVersion:      1,
@@ -82,8 +82,8 @@ func TestTOTPCredentialDetailValidate(t *testing.T) {
 	}
 }
 
-func TestPasskeyCredentialDetailValidate(t *testing.T) {
-	d := PasskeyCredentialDetail{
+func TestPasskeyCredDetailValidate(t *testing.T) {
+	d := PasskeyCredDetail{
 		CredentialID: uuid.New(),
 		PublicKey:    []byte("public-key-bytes"),
 	}
@@ -96,8 +96,8 @@ func TestPasskeyCredentialDetailValidate(t *testing.T) {
 	}
 }
 
-func TestMTLSCertificateCredentialDetailValidate(t *testing.T) {
-	d := MTLSCertificateCredentialDetail{
+func TestMTLSCertCredDetailValidate(t *testing.T) {
+	d := MTLSCertCredDetail{
 		CredentialID:    uuid.New(),
 		CertFingerprint: "sha256:abcd",
 	}

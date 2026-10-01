@@ -86,11 +86,11 @@ type PasswordHashParams struct {
 	Parallelism uint8
 }
 
-// PasswordCredentialDetail carries exactly the fields the model doc's
+// PasswordCredDetail carries exactly the fields the model doc's
 // storage-shape section identified as password-specific: a memory-hard
 // hash, its cost parameters, lockout tracking, and rehash-on-success
 // bookkeeping — none of which a token credential has any use for.
-type PasswordCredentialDetail struct {
+type PasswordCredDetail struct {
 	CredentialID   uuid.UUID
 	HashAlgorithm  string // e.g. "argon2id"
 	Hash           []byte
@@ -100,7 +100,7 @@ type PasswordCredentialDetail struct {
 	LastRehashedAt *time.Time
 }
 
-func (d PasswordCredentialDetail) Validate() error {
+func (d PasswordCredDetail) Validate() error {
 	if d.CredentialID == uuid.Nil {
 		return fmt.Errorf("structure: password credential detail: CredentialID is required")
 	}
@@ -113,10 +113,10 @@ func (d PasswordCredentialDetail) Validate() error {
 	return nil
 }
 
-// TokenCredentialDetail: a fast hash of an already-high-entropy value.
+// TokenCredDetail: a fast hash of an already-high-entropy value.
 // No cost parameters, never rehashed — deliberately the opposite shape
-// from PasswordCredentialDetail, not a variation on it.
-type TokenCredentialDetail struct {
+// from PasswordCredDetail, not a variation on it.
+type TokenCredDetail struct {
 	CredentialID uuid.UUID
 	Hash         []byte
 	Purpose      string
@@ -124,7 +124,7 @@ type TokenCredentialDetail struct {
 	ExpiresAt    *time.Time
 }
 
-func (d TokenCredentialDetail) Validate() error {
+func (d TokenCredDetail) Validate() error {
 	if d.CredentialID == uuid.Nil {
 		return fmt.Errorf("structure: token credential detail: CredentialID is required")
 	}
@@ -137,16 +137,16 @@ func (d TokenCredentialDetail) Validate() error {
 	return nil
 }
 
-// TOTPCredentialDetail: encrypted, reversible — the one credential
+// TOTPCredDetail: encrypted, reversible — the one credential
 // shape that must be decryptable, since the code has to compute the
 // current code from the secret rather than just comparing hashes.
-type TOTPCredentialDetail struct {
+type TOTPCredDetail struct {
 	CredentialID    uuid.UUID
 	EncryptedSecret []byte
 	KeyVersion      int
 }
 
-func (d TOTPCredentialDetail) Validate() error {
+func (d TOTPCredDetail) Validate() error {
 	if d.CredentialID == uuid.Nil {
 		return fmt.Errorf("structure: totp credential detail: CredentialID is required")
 	}
@@ -159,10 +159,10 @@ func (d TOTPCredentialDetail) Validate() error {
 	return nil
 }
 
-// PasskeyCredentialDetail: public key material only. Not a secret at
+// PasskeyCredDetail: public key material only. Not a secret at
 // all — never hashed, never encrypted, same as Lighthouse's own
 // passkey_credentials shape.
-type PasskeyCredentialDetail struct {
+type PasskeyCredDetail struct {
 	CredentialID uuid.UUID
 	PublicKey    []byte
 	SignCount    uint32
@@ -170,7 +170,7 @@ type PasskeyCredentialDetail struct {
 	BackedUp     bool
 }
 
-func (d PasskeyCredentialDetail) Validate() error {
+func (d PasskeyCredDetail) Validate() error {
 	if d.CredentialID == uuid.Nil {
 		return fmt.Errorf("structure: passkey credential detail: CredentialID is required")
 	}
@@ -180,15 +180,15 @@ func (d PasskeyCredentialDetail) Validate() error {
 	return nil
 }
 
-// MTLSCertificateCredentialDetail: no secret storage in gatehouse-core
+// MTLSCertCredDetail: no secret storage in gatehouse-core
 // at all, per the model doc. CertFingerprint is a reference into
 // certstore's own records, never a copy of the certificate or key.
-type MTLSCertificateCredentialDetail struct {
+type MTLSCertCredDetail struct {
 	CredentialID    uuid.UUID
 	CertFingerprint string
 }
 
-func (d MTLSCertificateCredentialDetail) Validate() error {
+func (d MTLSCertCredDetail) Validate() error {
 	if d.CredentialID == uuid.Nil {
 		return fmt.Errorf("structure: mtls certificate credential detail: CredentialID is required")
 	}
