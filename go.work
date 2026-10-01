@@ -6,4 +6,5 @@ use (
 	./db
 	./gatehouse-core
 	./logging
+	./typedvalue
 )
