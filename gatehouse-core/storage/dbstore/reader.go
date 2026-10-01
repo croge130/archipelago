@@ -1,0 +1,193 @@
+package dbstore
+
+import (
+	"context"
+	"errors"
+	"fmt"
+
+	"github.com/croge130/archipelago/gatehouse-core/structure"
+	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// PostgresReader implements evaluation.Store directly against
+// Postgres. Kept as its own type, separate from PostgresWriter below,
+// specifically so a future asymmetric-DB-access topology (per
+// docs/architecture/03-multi-instance-and-suites.md) can keep this
+// reader doing direct reads while swapping in a different Writer that
+// routes writes through a designated writer node instead — reads and
+// writes were never going to need to change together, so they were
+// never given one type to change together in.
+type PostgresReader struct {
+	pool *pgxpool.Pool
+}
+
+func NewPostgresReader(pool *pgxpool.Pool) *PostgresReader {
+	return &PostgresReader{pool: pool}
+}
+
+func (r *PostgresReader) GetPermissionDefinition(ctx context.Context, key string) (structure.PermissionDefinition, bool, error) {
+	var def structure.PermissionDefinition
+	err := r.pool.QueryRow(ctx,
+		`SELECT permission_key, required_authority_level, wildcard_includable
+		 FROM gatehouse_permission_definitions WHERE permission_key = $1`,
+		key,
+	).Scan(&def.PermissionKey, &def.RequiredAuthorityLevel, &def.WildcardIncludable)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return structure.PermissionDefinition{}, false, nil
+		}
+		return structure.PermissionDefinition{}, false, fmt.Errorf("dbstore: get permission definition: %w", err)
+	}
+	return def, true, nil
+}
+
+func (r *PostgresReader) ActiveGrantsForSubject(ctx context.Context, subjectType structure.GrantSubjectType, subjectID uuid.UUID) ([]structure.Grant, error) {
+	rows, err := r.pool.Query(ctx, `
+		SELECT grant_id, subject_type, subject_id, target_type, permission_key, role_id,
+		       scope, context_type, context_id, effect, status, origin, metadata,
+		       created_by, created_at, updated_at
+		FROM gatehouse_grants
+		WHERE subject_type = $1 AND subject_id = $2 AND status = $3`,
+		string(subjectType), uuidToText(subjectID), string(structure.GrantStatusActive),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("dbstore: active grants for subject: %w", err)
+	}
+	defer rows.Close()
+
+	var grants []structure.Grant
+	for rows.Next() {
+		g, err := scanGrant(rows)
+		if err != nil {
+			return nil, err
+		}
+		grants = append(grants, g)
+	}
+	return grants, rows.Err()
+}
+
+func (r *PostgresReader) GroupIDsForPrincipal(ctx context.Context, principalID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT group_id FROM gatehouse_group_memberships WHERE principal_id = $1`,
+		uuidToText(principalID),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("dbstore: group ids for principal: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []uuid.UUID
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, fmt.Errorf("dbstore: scan group id: %w", err)
+		}
+		id, err := parseUUID(s)
+		if err != nil {
+			return nil, fmt.Errorf("dbstore: parse group id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+func (r *PostgresReader) RolePermissions(ctx context.Context, roleID uuid.UUID) ([]structure.RolePermission, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT role_id, permission_key, child_role_id, effect
+		 FROM gatehouse_role_permissions WHERE role_id = $1`,
+		uuidToText(roleID),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("dbstore: role permissions: %w", err)
+	}
+	defer rows.Close()
+
+	var perms []structure.RolePermission
+	for rows.Next() {
+		var roleIDText string
+		var permissionKey, childRoleIDText *string
+		var effect string
+		if err := rows.Scan(&roleIDText, &permissionKey, &childRoleIDText, &effect); err != nil {
+			return nil, fmt.Errorf("dbstore: scan role permission: %w", err)
+		}
+		rid, err := parseUUID(roleIDText)
+		if err != nil {
+			return nil, fmt.Errorf("dbstore: parse role_id: %w", err)
+		}
+		childRoleID, err := parseNullableUUID(childRoleIDText)
+		if err != nil {
+			return nil, fmt.Errorf("dbstore: parse child_role_id: %w", err)
+		}
+		perms = append(perms, structure.RolePermission{
+			RoleID:        rid,
+			PermissionKey: permissionKey,
+			ChildRoleID:   childRoleID,
+			Effect:        structure.GrantEffect(effect),
+		})
+	}
+	return perms, rows.Err()
+}
+
+// GetGeneration reads the current generation counters. Not part of
+// evaluation.Store — Evaluate doesn't need it today — but a real read,
+// kept on the Reader rather than the Writer, for tests and future
+// freshness/snapshot work to build on. A missing row (nothing has ever
+// bumped either counter) reads as generation zero rather than an error.
+func (r *PostgresReader) GetGeneration(ctx context.Context) (structure.AuthorityGeneration, error) {
+	var gen structure.AuthorityGeneration
+	err := r.pool.QueryRow(ctx,
+		`SELECT permission_schema_generation, principal_grant_generation, updated_at
+		 FROM gatehouse_authority_generation WHERE id = true`,
+	).Scan(&gen.PermissionSchemaGeneration, &gen.PrincipalGrantGeneration, &gen.GeneratedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return structure.AuthorityGeneration{}, nil
+		}
+		return structure.AuthorityGeneration{}, fmt.Errorf("dbstore: get generation: %w", err)
+	}
+	return gen, nil
+}
+
+func scanGrant(rows pgx.Rows) (structure.Grant, error) {
+	var g structure.Grant
+	var grantIDText, subjectIDText string
+	var subjectType, targetType, scope, effect, status, origin string
+	var permissionKey, roleIDText, contextType, contextID, createdByText *string
+	var metadata []byte
+
+	if err := rows.Scan(
+		&grantIDText, &subjectType, &subjectIDText, &targetType, &permissionKey, &roleIDText,
+		&scope, &contextType, &contextID, &effect, &status, &origin, &metadata,
+		&createdByText, &g.CreatedAt, &g.UpdatedAt,
+	); err != nil {
+		return g, fmt.Errorf("dbstore: scan grant: %w", err)
+	}
+
+	var err error
+	if g.GrantID, err = parseUUID(grantIDText); err != nil {
+		return g, fmt.Errorf("dbstore: parse grant_id: %w", err)
+	}
+	if g.SubjectID, err = parseUUID(subjectIDText); err != nil {
+		return g, fmt.Errorf("dbstore: parse subject_id: %w", err)
+	}
+	if g.RoleID, err = parseNullableUUID(roleIDText); err != nil {
+		return g, fmt.Errorf("dbstore: parse role_id: %w", err)
+	}
+	if g.CreatedBy, err = parseNullableUUID(createdByText); err != nil {
+		return g, fmt.Errorf("dbstore: parse created_by: %w", err)
+	}
+
+	g.SubjectType = structure.GrantSubjectType(subjectType)
+	g.TargetType = structure.GrantTargetType(targetType)
+	g.PermissionKey = permissionKey
+	g.Scope = structure.GrantScope(scope)
+	g.ContextType = contextType
+	g.ContextID = contextID
+	g.Effect = structure.GrantEffect(effect)
+	g.Status = structure.GrantStatus(status)
+	g.Origin = structure.GrantOrigin(origin)
+	g.Metadata = metadata
+	return g, nil
+}
