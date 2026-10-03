@@ -19,6 +19,8 @@ type Reader interface {
 	GetGeneration(ctx context.Context) (structure.AuthorityGeneration, error)
 	GetCredentialByMTLSFingerprint(ctx context.Context, fingerprint string) (structure.Credential, structure.MTLSCertCredDetail, bool, error)
 	GetSession(ctx context.Context, id uuid.UUID) (structure.Session, bool, error)
+	GetInstance(ctx context.Context, instanceID uuid.UUID) (structure.Instance, bool, error)
+	ListInstancesByGroup(ctx context.Context, group string, activeSince time.Time) ([]structure.Instance, error)
 }
 
 // Writer is every mutation the facade drives. Moved here from
@@ -38,4 +40,8 @@ type Writer interface {
 	CreateMTLSCredential(ctx context.Context, cred structure.Credential, detail structure.MTLSCertCredDetail) error
 	CreateSession(ctx context.Context, s structure.Session) error
 	RevokeSession(ctx context.Context, id uuid.UUID, revokedAt time.Time) error
+	UpsertInstance(ctx context.Context, i structure.Instance) error
+	DeleteInstance(ctx context.Context, instanceID uuid.UUID) error
+	AcquireOrRenewLease(ctx context.Context, group, name string, holderInstanceID uuid.UUID, acquiredAt, expiresAt time.Time) (structure.Lease, bool, error)
+	ReleaseLease(ctx context.Context, group, name string, holderInstanceID uuid.UUID) error
 }

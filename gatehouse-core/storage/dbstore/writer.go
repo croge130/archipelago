@@ -2,6 +2,7 @@ package dbstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -285,6 +286,88 @@ func bumpPermissionSchemaGeneration(ctx context.Context, tx pgx.Tx) error {
 			updated_at = now()`)
 	if err != nil {
 		return fmt.Errorf("dbstore: bump permission schema generation: %w", err)
+	}
+	return nil
+}
+
+// UpsertInstance sets the full row for InstanceID — a raw set, like
+// alias's own UpsertAlias; the registry integration's RegisterFromSession
+// and Heartbeat decide the desired row state before calling this.
+func (w *PostgresWriter) UpsertInstance(ctx context.Context, i structure.Instance) error {
+	if err := i.Validate(); err != nil {
+		return err
+	}
+	_, err := w.pool.Exec(ctx,
+		`INSERT INTO gatehouse_instances (instance_id, principal_id, instance_group, metadata, registered_at, last_heartbeat_at)
+		 VALUES ($1,$2,$3,$4,$5,$6)
+		 ON CONFLICT (instance_id) DO UPDATE SET
+			last_heartbeat_at = EXCLUDED.last_heartbeat_at,
+			metadata = EXCLUDED.metadata`,
+		uuidToText(i.InstanceID), uuidToText(i.PrincipalID), i.Group, nullableJSON(i.Metadata),
+		i.RegisteredAt, i.LastHeartbeatAt,
+	)
+	if err != nil {
+		return fmt.Errorf("dbstore: upsert instance: %w", err)
+	}
+	return nil
+}
+
+// DeleteInstance removes an instance's row outright — the graceful-
+// shutdown deregistration path; a crashed instance simply ages out of
+// ListInstancesByGroup's own staleness cutoff instead of needing this.
+func (w *PostgresWriter) DeleteInstance(ctx context.Context, instanceID uuid.UUID) error {
+	_, err := w.pool.Exec(ctx, `DELETE FROM gatehouse_instances WHERE instance_id = $1`, uuidToText(instanceID))
+	if err != nil {
+		return fmt.Errorf("dbstore: delete instance: %w", err)
+	}
+	return nil
+}
+
+// AcquireOrRenewLease is the one atomic CAS this package relies on for
+// correctness, per 13-registry-and-leases-model.md: the WHERE clause on
+// the DO UPDATE only lets the conflicting row change if it's expired or
+// already held by holderInstanceID, so Postgres itself — not a
+// read-then-write race in Go — decides whether the lease was actually
+// claimed. ok is false, with no error, when the lease is held by
+// someone else and isn't expired yet.
+func (w *PostgresWriter) AcquireOrRenewLease(ctx context.Context, group, name string, holderInstanceID uuid.UUID, acquiredAt, expiresAt time.Time) (structure.Lease, bool, error) {
+	var l structure.Lease
+	var holderText string
+	err := w.pool.QueryRow(ctx,
+		`INSERT INTO gatehouse_leases (lease_group, lease_name, holder_instance_id, acquired_at, expires_at)
+		 VALUES ($1, $2, $3, $4, $5)
+		 ON CONFLICT (lease_group, lease_name) DO UPDATE SET
+			holder_instance_id = EXCLUDED.holder_instance_id,
+			acquired_at = EXCLUDED.acquired_at,
+			expires_at = EXCLUDED.expires_at
+		 WHERE gatehouse_leases.expires_at < EXCLUDED.acquired_at
+		    OR gatehouse_leases.holder_instance_id = EXCLUDED.holder_instance_id
+		 RETURNING lease_group, lease_name, holder_instance_id, acquired_at, expires_at`,
+		group, name, uuidToText(holderInstanceID), acquiredAt, expiresAt,
+	).Scan(&l.Group, &l.Name, &holderText, &l.AcquiredAt, &l.ExpiresAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return structure.Lease{}, false, nil
+		}
+		return structure.Lease{}, false, fmt.Errorf("dbstore: acquire or renew lease: %w", err)
+	}
+	if l.HolderInstanceID, err = parseUUID(holderText); err != nil {
+		return structure.Lease{}, false, fmt.Errorf("dbstore: parse holder_instance_id: %w", err)
+	}
+	return l, true, nil
+}
+
+// ReleaseLease deletes the lease on (group, name) only if
+// holderInstanceID is the one currently holding it — unconditionally
+// successful either way, since releasing something you don't hold
+// changes nothing, per 13-registry-and-leases-model.md.
+func (w *PostgresWriter) ReleaseLease(ctx context.Context, group, name string, holderInstanceID uuid.UUID) error {
+	_, err := w.pool.Exec(ctx,
+		`DELETE FROM gatehouse_leases WHERE lease_group = $1 AND lease_name = $2 AND holder_instance_id = $3`,
+		group, name, uuidToText(holderInstanceID),
+	)
+	if err != nil {
+		return fmt.Errorf("dbstore: release lease: %w", err)
 	}
 	return nil
 }

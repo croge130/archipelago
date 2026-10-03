@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/croge130/archipelago/gatehouse-core/structure"
 	"github.com/google/uuid"
@@ -331,4 +332,102 @@ func scanGrant(rows pgx.Rows) (structure.Grant, error) {
 	g.Origin = structure.GrantOrigin(origin)
 	g.Metadata = metadata
 	return g, nil
+}
+
+// rowScanner is satisfied by both pgx.Row (QueryRow) and pgx.Rows
+// (Query, row by row via Next) — the small scanner interface that
+// lets GetInstance and ListInstancesByGroup share one scan function.
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanInstance(row rowScanner) (structure.Instance, error) {
+	var i structure.Instance
+	var instanceIDText, principalIDText string
+	var metadata []byte
+
+	if err := row.Scan(
+		&instanceIDText, &principalIDText, &i.Group, &metadata,
+		&i.RegisteredAt, &i.LastHeartbeatAt,
+	); err != nil {
+		return i, fmt.Errorf("dbstore: scan instance: %w", err)
+	}
+
+	var err error
+	if i.InstanceID, err = parseUUID(instanceIDText); err != nil {
+		return i, fmt.Errorf("dbstore: parse instance_id: %w", err)
+	}
+	if i.PrincipalID, err = parseUUID(principalIDText); err != nil {
+		return i, fmt.Errorf("dbstore: parse principal_id: %w", err)
+	}
+	i.Metadata = metadata
+	return i, nil
+}
+
+// GetInstance looks up an instance by ID, regardless of how stale its
+// heartbeat is — staleness is a caller-chosen cutoff applied by
+// ListInstancesByGroup, not a property of a single lookup by identity.
+func (r *PostgresReader) GetInstance(ctx context.Context, instanceID uuid.UUID) (structure.Instance, bool, error) {
+	row := r.pool.QueryRow(ctx,
+		`SELECT instance_id, principal_id, instance_group, metadata, registered_at, last_heartbeat_at
+		 FROM gatehouse_instances WHERE instance_id = $1`,
+		uuidToText(instanceID),
+	)
+	i, err := scanInstance(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return structure.Instance{}, false, nil
+		}
+		return structure.Instance{}, false, err
+	}
+	return i, true, nil
+}
+
+// ListInstancesByGroup returns every instance in group whose last
+// heartbeat is at or after activeSince — the caller's own definition
+// of "still alive," per 13-registry-and-leases-model.md.
+func (r *PostgresReader) ListInstancesByGroup(ctx context.Context, group string, activeSince time.Time) ([]structure.Instance, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT instance_id, principal_id, instance_group, metadata, registered_at, last_heartbeat_at
+		 FROM gatehouse_instances WHERE instance_group = $1 AND last_heartbeat_at >= $2`,
+		group, activeSince,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("dbstore: list instances by group: %w", err)
+	}
+	defer rows.Close()
+
+	var instances []structure.Instance
+	for rows.Next() {
+		i, err := scanInstance(rows)
+		if err != nil {
+			return nil, err
+		}
+		instances = append(instances, i)
+	}
+	return instances, rows.Err()
+}
+
+// GetLease looks up the current lease on (group, name), expired or
+// not — expiry is a caller-side comparison against time.Now(), not
+// filtered out here, since "is it expired" and "who holds it" are two
+// different questions a caller may want answered separately.
+func (r *PostgresReader) GetLease(ctx context.Context, group, name string) (structure.Lease, bool, error) {
+	var l structure.Lease
+	var holderText string
+	err := r.pool.QueryRow(ctx,
+		`SELECT lease_group, lease_name, holder_instance_id, acquired_at, expires_at
+		 FROM gatehouse_leases WHERE lease_group = $1 AND lease_name = $2`,
+		group, name,
+	).Scan(&l.Group, &l.Name, &holderText, &l.AcquiredAt, &l.ExpiresAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return structure.Lease{}, false, nil
+		}
+		return structure.Lease{}, false, fmt.Errorf("dbstore: get lease: %w", err)
+	}
+	if l.HolderInstanceID, err = parseUUID(holderText); err != nil {
+		return structure.Lease{}, false, fmt.Errorf("dbstore: parse holder_instance_id: %w", err)
+	}
+	return l, true, nil
 }

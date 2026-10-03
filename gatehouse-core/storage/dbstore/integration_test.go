@@ -44,6 +44,7 @@ func setupTestStore(t *testing.T) (*PostgresReader, *PostgresWriter) {
 		gatehouse_password_credentials, gatehouse_token_credentials,
 		gatehouse_totp_credentials, gatehouse_passkey_credentials,
 		gatehouse_mtls_certificate_credentials, gatehouse_credentials,
+		gatehouse_leases, gatehouse_instances,
 		gatehouse_principals, gatehouse_permission_definitions,
 		gatehouse_contexts, gatehouse_context_types, gatehouse_templates,
 		gatehouse_authority_generation
@@ -490,5 +491,209 @@ func TestDBStoreRevokeSessionIsIdempotent(t *testing.T) {
 	}
 	if !got.RevokedAt.Before(first.Add(time.Second)) {
 		t.Fatalf("expected the original revocation time to stick, got %v", got.RevokedAt)
+	}
+}
+
+func testInstance(t *testing.T, ctx context.Context, writer *PostgresWriter, group string) structure.Instance {
+	t.Helper()
+	principal := testPrincipal()
+	if err := writer.CreatePrincipal(ctx, principal); err != nil {
+		t.Fatalf("CreatePrincipal: %v", err)
+	}
+	now := time.Now().Truncate(time.Microsecond) // matches timestamptz's own precision, see facade's EnsurePrincipal comment
+	i := structure.Instance{
+		InstanceID: uuid.New(), PrincipalID: principal.PrincipalID, Group: group,
+		RegisteredAt: now, LastHeartbeatAt: now,
+	}
+	if err := writer.UpsertInstance(ctx, i); err != nil {
+		t.Fatalf("UpsertInstance: %v", err)
+	}
+	return i
+}
+
+func TestDBStoreUpsertInstanceAndGetBack(t *testing.T) {
+	reader, writer := setupTestStore(t)
+	ctx := context.Background()
+
+	i := testInstance(t, ctx, writer, "gamebridge.workers")
+
+	got, found, err := reader.GetInstance(ctx, i.InstanceID)
+	if err != nil {
+		t.Fatalf("GetInstance: %v", err)
+	}
+	if !found || got.PrincipalID != i.PrincipalID || got.Group != "gamebridge.workers" {
+		t.Fatalf("GetInstance = %+v, found=%v", got, found)
+	}
+}
+
+func TestDBStoreGetInstanceNotFound(t *testing.T) {
+	reader, _ := setupTestStore(t)
+	_, found, err := reader.GetInstance(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("GetInstance: %v", err)
+	}
+	if found {
+		t.Fatal("expected not found for a never-registered instance")
+	}
+}
+
+func TestDBStoreUpsertInstanceUpdatesHeartbeat(t *testing.T) {
+	reader, writer := setupTestStore(t)
+	ctx := context.Background()
+
+	i := testInstance(t, ctx, writer, "gamebridge.workers")
+	i.LastHeartbeatAt = i.LastHeartbeatAt.Add(time.Minute)
+	if err := writer.UpsertInstance(ctx, i); err != nil {
+		t.Fatalf("UpsertInstance (heartbeat): %v", err)
+	}
+
+	got, found, err := reader.GetInstance(ctx, i.InstanceID)
+	if err != nil {
+		t.Fatalf("GetInstance: %v", err)
+	}
+	if !found || !got.LastHeartbeatAt.Equal(i.LastHeartbeatAt) {
+		t.Fatalf("expected the heartbeat to be updated, got %+v", got)
+	}
+}
+
+func TestDBStoreDeleteInstance(t *testing.T) {
+	reader, writer := setupTestStore(t)
+	ctx := context.Background()
+
+	i := testInstance(t, ctx, writer, "gamebridge.workers")
+	if err := writer.DeleteInstance(ctx, i.InstanceID); err != nil {
+		t.Fatalf("DeleteInstance: %v", err)
+	}
+	_, found, err := reader.GetInstance(ctx, i.InstanceID)
+	if err != nil {
+		t.Fatalf("GetInstance: %v", err)
+	}
+	if found {
+		t.Fatal("expected the instance to be gone after DeleteInstance")
+	}
+}
+
+func TestDBStoreListInstancesByGroupRespectsStalenessCutoff(t *testing.T) {
+	reader, writer := setupTestStore(t)
+	ctx := context.Background()
+
+	fresh := testInstance(t, ctx, writer, "gamebridge.workers")
+
+	stale := testInstance(t, ctx, writer, "gamebridge.workers")
+	stale.LastHeartbeatAt = time.Now().Add(-time.Hour)
+	if err := writer.UpsertInstance(ctx, stale); err != nil {
+		t.Fatalf("UpsertInstance (stale): %v", err)
+	}
+
+	testInstance(t, ctx, writer, "storage-manager.workers")
+
+	got, err := reader.ListInstancesByGroup(ctx, "gamebridge.workers", time.Now().Add(-time.Minute))
+	if err != nil {
+		t.Fatalf("ListInstancesByGroup: %v", err)
+	}
+	if len(got) != 1 || got[0].InstanceID != fresh.InstanceID {
+		t.Fatalf("ListInstancesByGroup = %+v, want exactly [%s]", got, fresh.InstanceID)
+	}
+}
+
+func TestDBStoreAcquireLeaseThenConflictThenRelease(t *testing.T) {
+	reader, writer := setupTestStore(t)
+	ctx := context.Background()
+
+	holder := testInstance(t, ctx, writer, "gamebridge.workers")
+	rival := testInstance(t, ctx, writer, "gamebridge.workers")
+
+	now := time.Now()
+	lease, ok, err := writer.AcquireOrRenewLease(ctx, "gamebridge.workers", "reconciler", holder.InstanceID, now, now.Add(time.Minute))
+	if err != nil {
+		t.Fatalf("AcquireOrRenewLease (first): %v", err)
+	}
+	if !ok || lease.HolderInstanceID != holder.InstanceID {
+		t.Fatalf("expected the first acquire to succeed, got ok=%v lease=%+v", ok, lease)
+	}
+
+	// A rival instance trying to acquire the same, unexpired lease must
+	// be rejected, not silently steal it.
+	_, ok, err = writer.AcquireOrRenewLease(ctx, "gamebridge.workers", "reconciler", rival.InstanceID, time.Now(), time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatalf("AcquireOrRenewLease (rival): %v", err)
+	}
+	if ok {
+		t.Fatal("expected the rival's acquire to fail while the lease is still held and unexpired")
+	}
+
+	// The original holder renewing its own lease must succeed.
+	renewed, ok, err := writer.AcquireOrRenewLease(ctx, "gamebridge.workers", "reconciler", holder.InstanceID, time.Now(), time.Now().Add(2*time.Minute))
+	if err != nil {
+		t.Fatalf("AcquireOrRenewLease (renew): %v", err)
+	}
+	if !ok || renewed.HolderInstanceID != holder.InstanceID {
+		t.Fatalf("expected the holder's own renewal to succeed, got ok=%v lease=%+v", ok, renewed)
+	}
+
+	if err := writer.ReleaseLease(ctx, "gamebridge.workers", "reconciler", holder.InstanceID); err != nil {
+		t.Fatalf("ReleaseLease: %v", err)
+	}
+	_, found, err := reader.GetLease(ctx, "gamebridge.workers", "reconciler")
+	if err != nil {
+		t.Fatalf("GetLease: %v", err)
+	}
+	if found {
+		t.Fatal("expected the lease to be gone after ReleaseLease")
+	}
+
+	// Now the rival can acquire the freshly released lease.
+	claimed, ok, err := writer.AcquireOrRenewLease(ctx, "gamebridge.workers", "reconciler", rival.InstanceID, time.Now(), time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatalf("AcquireOrRenewLease (rival after release): %v", err)
+	}
+	if !ok || claimed.HolderInstanceID != rival.InstanceID {
+		t.Fatalf("expected the rival to acquire the released lease, got ok=%v lease=%+v", ok, claimed)
+	}
+}
+
+func TestDBStoreAcquireLeaseExpiredIsReclaimable(t *testing.T) {
+	_, writer := setupTestStore(t)
+	ctx := context.Background()
+
+	holder := testInstance(t, ctx, writer, "gamebridge.workers")
+	rival := testInstance(t, ctx, writer, "gamebridge.workers")
+
+	past := time.Now().Add(-time.Hour)
+	if _, ok, err := writer.AcquireOrRenewLease(ctx, "gamebridge.workers", "reconciler", holder.InstanceID, past, past.Add(time.Second)); err != nil || !ok {
+		t.Fatalf("AcquireOrRenewLease (expired-on-arrival): ok=%v err=%v", ok, err)
+	}
+
+	claimed, ok, err := writer.AcquireOrRenewLease(ctx, "gamebridge.workers", "reconciler", rival.InstanceID, time.Now(), time.Now().Add(time.Minute))
+	if err != nil {
+		t.Fatalf("AcquireOrRenewLease (reclaim): %v", err)
+	}
+	if !ok || claimed.HolderInstanceID != rival.InstanceID {
+		t.Fatalf("expected an expired lease to be reclaimable by a different instance, got ok=%v lease=%+v", ok, claimed)
+	}
+}
+
+func TestDBStoreReleaseLeaseByNonHolderIsNoop(t *testing.T) {
+	reader, writer := setupTestStore(t)
+	ctx := context.Background()
+
+	holder := testInstance(t, ctx, writer, "gamebridge.workers")
+	impostor := testInstance(t, ctx, writer, "gamebridge.workers")
+
+	now := time.Now()
+	if _, ok, err := writer.AcquireOrRenewLease(ctx, "gamebridge.workers", "reconciler", holder.InstanceID, now, now.Add(time.Minute)); err != nil || !ok {
+		t.Fatalf("AcquireOrRenewLease: ok=%v err=%v", ok, err)
+	}
+
+	if err := writer.ReleaseLease(ctx, "gamebridge.workers", "reconciler", impostor.InstanceID); err != nil {
+		t.Fatalf("ReleaseLease (non-holder): %v", err)
+	}
+
+	got, found, err := reader.GetLease(ctx, "gamebridge.workers", "reconciler")
+	if err != nil {
+		t.Fatalf("GetLease: %v", err)
+	}
+	if !found || got.HolderInstanceID != holder.InstanceID {
+		t.Fatalf("expected the real holder's lease to survive a non-holder's release, got found=%v lease=%+v", found, got)
 	}
 }

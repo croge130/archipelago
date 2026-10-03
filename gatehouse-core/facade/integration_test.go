@@ -11,6 +11,7 @@ import (
 	"errors"
 	"os"
 	"testing"
+	"time"
 
 	archidb "github.com/croge130/archipelago/db"
 	"github.com/croge130/archipelago/gatehouse-core/evaluation"
@@ -46,6 +47,7 @@ func setupFacadeTest(t *testing.T) (Reader, Writer) {
 		gatehouse_password_credentials, gatehouse_token_credentials,
 		gatehouse_totp_credentials, gatehouse_passkey_credentials,
 		gatehouse_mtls_certificate_credentials, gatehouse_credentials,
+		gatehouse_leases, gatehouse_instances,
 		gatehouse_principals, gatehouse_permission_definitions,
 		gatehouse_contexts, gatehouse_context_types, gatehouse_templates,
 		gatehouse_authority_generation
@@ -245,5 +247,102 @@ func TestCreateSessionAndRevoke(t *testing.T) {
 	}
 	if !found || got.RevokedAt == nil {
 		t.Fatalf("expected the session to be revoked, got %+v found=%v", got, found)
+	}
+}
+
+func TestRegisterInstanceAndHeartbeat(t *testing.T) {
+	reader, writer := setupFacadeTest(t)
+	ctx := context.Background()
+
+	p, err := EnsurePrincipal(ctx, reader, writer, "service.gamebridge", structure.PrincipalTypeServiceAccount)
+	if err != nil {
+		t.Fatalf("EnsurePrincipal: %v", err)
+	}
+
+	inst, err := RegisterInstance(ctx, writer, p.PrincipalID, "gamebridge.workers", nil)
+	if err != nil {
+		t.Fatalf("RegisterInstance: %v", err)
+	}
+	if inst.InstanceID == uuid.Nil {
+		t.Fatal("expected RegisterInstance to assign an InstanceID")
+	}
+
+	firstHeartbeat := inst.LastHeartbeatAt
+	time.Sleep(time.Millisecond) // guarantee a distinguishable timestamp
+	updated, err := Heartbeat(ctx, reader, writer, inst.InstanceID)
+	if err != nil {
+		t.Fatalf("Heartbeat: %v", err)
+	}
+	if !updated.LastHeartbeatAt.After(firstHeartbeat) {
+		t.Fatalf("expected Heartbeat to advance LastHeartbeatAt, got %v (was %v)", updated.LastHeartbeatAt, firstHeartbeat)
+	}
+
+	if err := Deregister(ctx, writer, inst.InstanceID); err != nil {
+		t.Fatalf("Deregister: %v", err)
+	}
+	if _, err := Heartbeat(ctx, reader, writer, inst.InstanceID); !errors.Is(err, ErrInstanceNotFound) {
+		t.Fatalf("expected ErrInstanceNotFound after Deregister, got: %v", err)
+	}
+}
+
+func TestListPeersRespectsActiveWithin(t *testing.T) {
+	reader, writer := setupFacadeTest(t)
+	ctx := context.Background()
+
+	p, err := EnsurePrincipal(ctx, reader, writer, "service.gamebridge", structure.PrincipalTypeServiceAccount)
+	if err != nil {
+		t.Fatalf("EnsurePrincipal: %v", err)
+	}
+	fresh, err := RegisterInstance(ctx, writer, p.PrincipalID, "gamebridge.workers", nil)
+	if err != nil {
+		t.Fatalf("RegisterInstance (fresh): %v", err)
+	}
+	stale, err := RegisterInstance(ctx, writer, p.PrincipalID, "gamebridge.workers", nil)
+	if err != nil {
+		t.Fatalf("RegisterInstance (stale): %v", err)
+	}
+	stale.LastHeartbeatAt = time.Now().Add(-time.Hour)
+	if err := writer.UpsertInstance(ctx, stale); err != nil {
+		t.Fatalf("UpsertInstance (age stale instance): %v", err)
+	}
+
+	peers, err := ListPeers(ctx, reader, "gamebridge.workers", time.Minute)
+	if err != nil {
+		t.Fatalf("ListPeers: %v", err)
+	}
+	if len(peers) != 1 || peers[0].InstanceID != fresh.InstanceID {
+		t.Fatalf("ListPeers = %+v, want exactly [%s]", peers, fresh.InstanceID)
+	}
+}
+
+func TestAcquireOrRenewLeaseAndRelease(t *testing.T) {
+	reader, writer := setupFacadeTest(t)
+	ctx := context.Background()
+
+	p, err := EnsurePrincipal(ctx, reader, writer, "service.gamebridge", structure.PrincipalTypeServiceAccount)
+	if err != nil {
+		t.Fatalf("EnsurePrincipal: %v", err)
+	}
+	holder, err := RegisterInstance(ctx, writer, p.PrincipalID, "gamebridge.workers", nil)
+	if err != nil {
+		t.Fatalf("RegisterInstance (holder): %v", err)
+	}
+	rival, err := RegisterInstance(ctx, writer, p.PrincipalID, "gamebridge.workers", nil)
+	if err != nil {
+		t.Fatalf("RegisterInstance (rival): %v", err)
+	}
+
+	if _, ok, err := AcquireOrRenewLease(ctx, writer, "gamebridge.workers", "reconciler", holder.InstanceID, time.Minute); err != nil || !ok {
+		t.Fatalf("AcquireOrRenewLease (holder): ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := AcquireOrRenewLease(ctx, writer, "gamebridge.workers", "reconciler", rival.InstanceID, time.Minute); err != nil || ok {
+		t.Fatalf("expected the rival's acquire to fail, got ok=%v err=%v", ok, err)
+	}
+
+	if err := ReleaseLease(ctx, writer, "gamebridge.workers", "reconciler", holder.InstanceID); err != nil {
+		t.Fatalf("ReleaseLease: %v", err)
+	}
+	if _, ok, err := AcquireOrRenewLease(ctx, writer, "gamebridge.workers", "reconciler", rival.InstanceID, time.Minute); err != nil || !ok {
+		t.Fatalf("expected the rival to acquire the released lease, got ok=%v err=%v", ok, err)
 	}
 }
