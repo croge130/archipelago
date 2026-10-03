@@ -113,7 +113,7 @@ func TestRequireGrantedPermission(t *testing.T) {
 	if _, err := facade.EnsureMTLSCredential(ctx, reader, writer, p.PrincipalID, "sha256:abcd1234"); err != nil {
 		t.Fatalf("EnsureMTLSCredential: %v", err)
 	}
-	if err := facade.RegisterPermission(ctx, writer, structure.PermissionDefinition{
+	if err := facade.RegisterPermission(ctx, reader, writer, structure.PermissionDefinition{
 		PermissionKey: "myapp.storage.read", RequiredAuthorityLevel: structure.AuthorityLevelStandard,
 	}, facade.RegisterPermissionOptions{}); err != nil {
 		t.Fatalf("RegisterPermission: %v", err)
@@ -139,7 +139,7 @@ func TestRequireUngrantedPermissionDenied(t *testing.T) {
 	if _, err := facade.EnsureMTLSCredential(ctx, reader, writer, p.PrincipalID, "sha256:abcd1234"); err != nil {
 		t.Fatalf("EnsureMTLSCredential: %v", err)
 	}
-	if err := facade.RegisterPermission(ctx, writer, structure.PermissionDefinition{
+	if err := facade.RegisterPermission(ctx, reader, writer, structure.PermissionDefinition{
 		PermissionKey: "myapp.storage.read", RequiredAuthorityLevel: structure.AuthorityLevelStandard,
 	}, facade.RegisterPermissionOptions{}); err != nil {
 		t.Fatalf("RegisterPermission: %v", err)

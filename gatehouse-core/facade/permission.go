@@ -39,14 +39,32 @@ type RegisterPermissionOptions struct {
 // RegisterPermission registers a PermissionDefinition, enforcing the
 // reserved-namespace default and structure's own shape validation
 // (which already rejects, among other things, a wildcard-includable
-// recovery_access definition).
-func RegisterPermission(ctx context.Context, writer Writer, def structure.PermissionDefinition, opts RegisterPermissionOptions) error {
+// recovery_access definition). Idempotent by PermissionKey, the same
+// "ensure" rule EnsureMTLSCredential's own doc comment names: a second
+// call registering the exact same definition is a no-op, never a raw
+// insert that errors on the key's own uniqueness constraint — the
+// shape every caller actually wants for something meant to run at
+// every app startup. A second call with a different definition under
+// the same key is ErrConflict, not a silent redefinition.
+func RegisterPermission(ctx context.Context, reader Reader, writer Writer, def structure.PermissionDefinition, opts RegisterPermissionOptions) error {
 	if err := def.Validate(); err != nil {
 		return err
 	}
 	if !opts.AllowReservedNamespace && isReservedNamespace(def.PermissionKey) {
 		return fmt.Errorf("facade: register permission: %q is under a reserved namespace; set AllowReservedNamespace to override", def.PermissionKey)
 	}
+
+	existing, found, err := reader.GetPermissionDefinition(ctx, def.PermissionKey)
+	if err != nil {
+		return fmt.Errorf("facade: register permission: %w", err)
+	}
+	if found {
+		if existing == def {
+			return nil
+		}
+		return ErrConflict
+	}
+
 	if err := writer.RegisterPermissionDefinition(ctx, def); err != nil {
 		return fmt.Errorf("facade: register permission: %w", err)
 	}

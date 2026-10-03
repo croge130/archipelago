@@ -121,10 +121,10 @@ func TestEnsureMTLSCredentialConflict(t *testing.T) {
 }
 
 func TestRegisterPermissionBlocksReservedNamespaceByDefault(t *testing.T) {
-	_, writer := setupFacadeTest(t)
+	reader, writer := setupFacadeTest(t)
 	ctx := context.Background()
 
-	err := RegisterPermission(ctx, writer, structure.PermissionDefinition{
+	err := RegisterPermission(ctx, reader, writer, structure.PermissionDefinition{
 		PermissionKey:          "gatehouse.principal.delete",
 		RequiredAuthorityLevel: structure.AuthorityLevelElevated,
 	}, RegisterPermissionOptions{})
@@ -134,10 +134,10 @@ func TestRegisterPermissionBlocksReservedNamespaceByDefault(t *testing.T) {
 }
 
 func TestRegisterPermissionAllowsReservedNamespaceWithOverride(t *testing.T) {
-	_, writer := setupFacadeTest(t)
+	reader, writer := setupFacadeTest(t)
 	ctx := context.Background()
 
-	err := RegisterPermission(ctx, writer, structure.PermissionDefinition{
+	err := RegisterPermission(ctx, reader, writer, structure.PermissionDefinition{
 		PermissionKey:          "gatehouse.principal.delete",
 		RequiredAuthorityLevel: structure.AuthorityLevelElevated,
 	}, RegisterPermissionOptions{AllowReservedNamespace: true})
@@ -147,15 +147,40 @@ func TestRegisterPermissionAllowsReservedNamespaceWithOverride(t *testing.T) {
 }
 
 func TestRegisterPermissionAllowsOrdinaryAppNamespace(t *testing.T) {
-	_, writer := setupFacadeTest(t)
+	reader, writer := setupFacadeTest(t)
 	ctx := context.Background()
 
-	err := RegisterPermission(ctx, writer, structure.PermissionDefinition{
+	err := RegisterPermission(ctx, reader, writer, structure.PermissionDefinition{
 		PermissionKey:          "myapp.readinglist.read",
 		RequiredAuthorityLevel: structure.AuthorityLevelStandard,
 	}, RegisterPermissionOptions{})
 	if err != nil {
 		t.Fatalf("expected an ordinary app-namespaced permission to register without the override, got: %v", err)
+	}
+}
+
+func TestRegisterPermissionIsIdempotent(t *testing.T) {
+	reader, writer := setupFacadeTest(t)
+	ctx := context.Background()
+
+	def := structure.PermissionDefinition{
+		PermissionKey:          "myapp.readinglist.read",
+		RequiredAuthorityLevel: structure.AuthorityLevelStandard,
+	}
+	if err := RegisterPermission(ctx, reader, writer, def, RegisterPermissionOptions{}); err != nil {
+		t.Fatalf("first RegisterPermission: %v", err)
+	}
+	// Same definition again: a no-op, not a unique-constraint error —
+	// the whole point of making this "ensure"-shaped rather than a raw
+	// insert, since it's meant to be safe to call on every app startup.
+	if err := RegisterPermission(ctx, reader, writer, def, RegisterPermissionOptions{}); err != nil {
+		t.Fatalf("second RegisterPermission with the same definition: %v", err)
+	}
+
+	conflicting := def
+	conflicting.RequiredAuthorityLevel = structure.AuthorityLevelElevated
+	if err := RegisterPermission(ctx, reader, writer, conflicting, RegisterPermissionOptions{}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict re-registering %q with a different definition, got: %v", def.PermissionKey, err)
 	}
 }
 
@@ -167,7 +192,7 @@ func TestGrantPermissionAndEvaluateEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsurePrincipal: %v", err)
 	}
-	if err := RegisterPermission(ctx, writer, structure.PermissionDefinition{
+	if err := RegisterPermission(ctx, reader, writer, structure.PermissionDefinition{
 		PermissionKey: "myapp.readinglist.read", RequiredAuthorityLevel: structure.AuthorityLevelStandard,
 	}, RegisterPermissionOptions{}); err != nil {
 		t.Fatalf("RegisterPermission: %v", err)
