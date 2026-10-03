@@ -15,6 +15,7 @@ import (
 type Reader interface {
 	evaluation.Store
 	GetPrincipalByKey(ctx context.Context, key string) (structure.Principal, bool, error)
+	GetPrincipal(ctx context.Context, principalID uuid.UUID) (structure.Principal, bool, error)
 	GetGeneration(ctx context.Context) (structure.AuthorityGeneration, error)
 	GetCredentialByMTLSFingerprint(ctx context.Context, fingerprint string) (structure.Credential, structure.MTLSCertCredDetail, bool, error)
 	GetSession(ctx context.Context, id uuid.UUID) (structure.Session, bool, error)

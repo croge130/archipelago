@@ -60,6 +60,39 @@ func (r *PostgresReader) GetPrincipalByKey(ctx context.Context, key string) (str
 	return p, true, nil
 }
 
+// GetPrincipal looks up a principal by its PrincipalID — the lookup
+// Evaluate itself never needs (it always already has a PrincipalID in
+// hand) but a caller vouching for one, like SSO ticket issuance, does:
+// confirming the subject it's about to sign for actually exists before
+// signing anything.
+func (r *PostgresReader) GetPrincipal(ctx context.Context, principalID uuid.UUID) (structure.Principal, bool, error) {
+	var p structure.Principal
+	var principalIDText string
+	var typ string
+	var ownerText *string
+	var metadata []byte
+	err := r.pool.QueryRow(ctx,
+		`SELECT principal_id, key, display_name, type, owner_principal_id, metadata, created_at, updated_at
+		 FROM gatehouse_principals WHERE principal_id = $1`,
+		principalID.String(),
+	).Scan(&principalIDText, &p.Key, &p.DisplayName, &typ, &ownerText, &metadata, &p.CreatedAt, &p.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return structure.Principal{}, false, nil
+		}
+		return structure.Principal{}, false, fmt.Errorf("dbstore: get principal: %w", err)
+	}
+	if p.PrincipalID, err = parseUUID(principalIDText); err != nil {
+		return structure.Principal{}, false, fmt.Errorf("dbstore: parse principal_id: %w", err)
+	}
+	if p.OwnerPrincipalID, err = parseNullableUUID(ownerText); err != nil {
+		return structure.Principal{}, false, fmt.Errorf("dbstore: parse owner_principal_id: %w", err)
+	}
+	p.Type = structure.PrincipalType(typ)
+	p.Metadata = metadata
+	return p, true, nil
+}
+
 // GetCredentialByMTLSFingerprint resolves a verified mTLS peer's
 // certificate fingerprint straight to the Credential and its detail
 // row — peer authorization's primary lookup, per
