@@ -121,7 +121,7 @@ These need Layer 2 integrations, not just Layer 1 bases directly.
 | Feature | Needs | Notes |
 |---|---|---|
 | **SSO ticket issuance/verification** | Gatehouse-core + Cert-store (dedicated signing key, *not* the mTLS key) + Transit for delivery | Audience-bound, identity-only, short-lived — see [`12-sso-tickets-model.md`](12-sso-tickets-model.md) |
-| **Multi-instance coordination** (peer discovery, broadcast, locks) | Transit + Gatehouse-core (registry/grouping concept) | See `03-multi-instance-and-suites.md` |
+| **Multi-instance coordination** (peer discovery, broadcast, locks) | Transit + Gatehouse-core (registry/grouping concept) | See [`03-multi-instance-and-suites.md`](03-multi-instance-and-suites.md) and [`13-registry-and-leases-model.md`](13-registry-and-leases-model.md) |
 | **Status/health aggregation** | Policy (aggregation-policy pointer) + Transit (propagation envelope) + the same registry/grouping concept | Group definition holds a policy pointer; each computed rollup snapshots the resolved value |
 | **Endpoint self-advertisement** | Gatehouse-core (permission metadata declared at registration) + the registry | The thing that replaces a hand-maintained allowlist with a real source of truth |
 | **Admin/destructive-action key enrollment** | Cert-store (CSR+CA signing) + an out-of-band confirmation path (CLI) | Deliberately *not* gated by the same signed-request mechanism as app-level dangerous actions — machine access to the backend already implies broader trust than that mechanism would add |
