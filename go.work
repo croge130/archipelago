@@ -9,6 +9,7 @@ use (
 	./mtls
 	./peerauth
 	./policy
+	./sessions
 	./transit
 	./transit/websocket
 	./typeconstraints
