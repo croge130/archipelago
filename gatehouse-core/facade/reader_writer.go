@@ -2,9 +2,11 @@ package facade
 
 import (
 	"context"
+	"time"
 
 	"github.com/croge130/archipelago/gatehouse-core/evaluation"
 	"github.com/croge130/archipelago/gatehouse-core/structure"
+	"github.com/google/uuid"
 )
 
 // Reader is everything the facade needs to read: evaluation.Store (so
@@ -15,6 +17,7 @@ type Reader interface {
 	GetPrincipalByKey(ctx context.Context, key string) (structure.Principal, bool, error)
 	GetGeneration(ctx context.Context) (structure.AuthorityGeneration, error)
 	GetCredentialByMTLSFingerprint(ctx context.Context, fingerprint string) (structure.Credential, structure.MTLSCertCredDetail, bool, error)
+	GetSession(ctx context.Context, id uuid.UUID) (structure.Session, bool, error)
 }
 
 // Writer is every mutation the facade drives. Moved here from
@@ -32,4 +35,6 @@ type Writer interface {
 	CreateGroup(ctx context.Context, g structure.Group) error
 	AddGroupMember(ctx context.Context, m structure.GroupMembership) error
 	CreateMTLSCredential(ctx context.Context, cred structure.Credential, detail structure.MTLSCertCredDetail) error
+	CreateSession(ctx context.Context, s structure.Session) error
+	RevokeSession(ctx context.Context, id uuid.UUID, revokedAt time.Time) error
 }

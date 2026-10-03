@@ -381,3 +381,114 @@ func TestDBStoreGenerationBumpsOnPermissionRegister(t *testing.T) {
 		t.Errorf("permission_schema_generation = %d, want %d", after.PermissionSchemaGeneration, before.PermissionSchemaGeneration+1)
 	}
 }
+
+func TestDBStoreCreateSessionAndGetBack(t *testing.T) {
+	reader, writer := setupTestStore(t)
+	ctx := context.Background()
+
+	principal := testPrincipal()
+	if err := writer.CreatePrincipal(ctx, principal); err != nil {
+		t.Fatalf("CreatePrincipal: %v", err)
+	}
+
+	now := time.Now()
+	s := structure.Session{
+		SessionID: uuid.New(), PrincipalID: principal.PrincipalID,
+		Kind: structure.SessionKindService, AuthorityLevel: structure.AuthorityLevelStandard,
+		AuthenticationMethod: "mtls_certificate", CreatedAt: now, LastSeen: now,
+	}
+	if err := writer.CreateSession(ctx, s); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	got, found, err := reader.GetSession(ctx, s.SessionID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if !found || got.PrincipalID != principal.PrincipalID || got.Kind != structure.SessionKindService {
+		t.Fatalf("GetSession = %+v, found=%v", got, found)
+	}
+	if got.RevokedAt != nil {
+		t.Fatalf("expected a freshly created session to not be revoked, got %+v", got.RevokedAt)
+	}
+}
+
+func TestDBStoreGetSessionNotFound(t *testing.T) {
+	reader, _ := setupTestStore(t)
+	_, found, err := reader.GetSession(context.Background(), uuid.New())
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if found {
+		t.Fatal("expected not found for a never-created session")
+	}
+}
+
+func TestDBStoreRevokeSession(t *testing.T) {
+	reader, writer := setupTestStore(t)
+	ctx := context.Background()
+
+	principal := testPrincipal()
+	if err := writer.CreatePrincipal(ctx, principal); err != nil {
+		t.Fatalf("CreatePrincipal: %v", err)
+	}
+	now := time.Now()
+	s := structure.Session{
+		SessionID: uuid.New(), PrincipalID: principal.PrincipalID,
+		Kind: structure.SessionKindService, AuthorityLevel: structure.AuthorityLevelStandard,
+		AuthenticationMethod: "mtls_certificate", CreatedAt: now, LastSeen: now,
+	}
+	if err := writer.CreateSession(ctx, s); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	if err := writer.RevokeSession(ctx, s.SessionID, time.Now()); err != nil {
+		t.Fatalf("RevokeSession: %v", err)
+	}
+	got, found, err := reader.GetSession(ctx, s.SessionID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if !found || got.RevokedAt == nil {
+		t.Fatalf("expected the session to be revoked, got %+v", got)
+	}
+}
+
+func TestDBStoreRevokeSessionIsIdempotent(t *testing.T) {
+	reader, writer := setupTestStore(t)
+	ctx := context.Background()
+
+	principal := testPrincipal()
+	if err := writer.CreatePrincipal(ctx, principal); err != nil {
+		t.Fatalf("CreatePrincipal: %v", err)
+	}
+	now := time.Now()
+	s := structure.Session{
+		SessionID: uuid.New(), PrincipalID: principal.PrincipalID,
+		Kind: structure.SessionKindService, AuthorityLevel: structure.AuthorityLevelStandard,
+		AuthenticationMethod: "mtls_certificate", CreatedAt: now, LastSeen: now,
+	}
+	if err := writer.CreateSession(ctx, s); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+
+	first := time.Now()
+	if err := writer.RevokeSession(ctx, s.SessionID, first); err != nil {
+		t.Fatalf("RevokeSession (first): %v", err)
+	}
+	// A second revoke must not overwrite the original revocation time
+	// — the WHERE revoked_at IS NULL guard makes this a no-op.
+	if err := writer.RevokeSession(ctx, s.SessionID, time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("RevokeSession (second): %v", err)
+	}
+	got, found, err := reader.GetSession(ctx, s.SessionID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if !found || got.RevokedAt == nil {
+		t.Fatalf("expected the session to still be revoked, got %+v", got)
+	}
+	if !got.RevokedAt.Before(first.Add(time.Second)) {
+		t.Fatalf("expected the original revocation time to stick, got %v", got.RevokedAt)
+	}
+}

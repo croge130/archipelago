@@ -3,6 +3,7 @@ package dbstore
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/croge130/archipelago/gatehouse-core/structure"
 	"github.com/google/uuid"
@@ -85,6 +86,44 @@ func (w *PostgresWriter) CreateMTLSCredential(ctx context.Context, cred structur
 		return fmt.Errorf("dbstore: create mtls credential: %w", err)
 	}
 	return tx.Commit(ctx)
+}
+
+// CreateSession inserts a new session. Never bumps
+// principal_grant_generation — authenticating is orthogonal to what a
+// principal is authorized for, which only grants/roles/groups change.
+func (w *PostgresWriter) CreateSession(ctx context.Context, s structure.Session) error {
+	if err := s.Validate(); err != nil {
+		return err
+	}
+	_, err := w.pool.Exec(ctx,
+		`INSERT INTO gatehouse_sessions (
+			session_id, principal_id, credential_id, kind, authority_level, authentication_method,
+			asserted_by_principal_id, metadata, created_at, expires_at, last_seen, revoked_at
+		 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+		uuidToText(s.SessionID), uuidToText(s.PrincipalID), nullableUUIDToText(s.CredentialID),
+		string(s.Kind), string(s.AuthorityLevel), string(s.AuthenticationMethod),
+		nullableUUIDToText(s.AssertedByPrincipalID), nullableJSON(s.Metadata),
+		s.CreatedAt, s.ExpiresAt, s.LastSeen, s.RevokedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("dbstore: create session: %w", err)
+	}
+	return nil
+}
+
+// RevokeSession marks a session revoked. Per the model doc's standing
+// invariant, a revoked session is never honored by anything cached
+// regardless of what any snapshot still claims — this is the write
+// that makes that true going forward from the moment it commits.
+func (w *PostgresWriter) RevokeSession(ctx context.Context, id uuid.UUID, revokedAt time.Time) error {
+	_, err := w.pool.Exec(ctx,
+		`UPDATE gatehouse_sessions SET revoked_at = $2 WHERE session_id = $1 AND revoked_at IS NULL`,
+		uuidToText(id), revokedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("dbstore: revoke session: %w", err)
+	}
+	return nil
 }
 
 func (w *PostgresWriter) RegisterPermissionDefinition(ctx context.Context, def structure.PermissionDefinition) error {

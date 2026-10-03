@@ -95,6 +95,46 @@ func (r *PostgresReader) GetCredentialByMTLSFingerprint(ctx context.Context, fin
 	return cred, detail, true, nil
 }
 
+// GetSession looks up a session by ID. Not part of evaluation.Store —
+// Evaluate works from a PrincipalID and an AuthorityLevel the caller
+// already has in hand, never from a session lookup of its own.
+func (r *PostgresReader) GetSession(ctx context.Context, id uuid.UUID) (structure.Session, bool, error) {
+	var s structure.Session
+	var sessionIDText, principalIDText, kind, authorityLevel, authMethod string
+	var credentialIDText, assertedByText *string
+	var metadata []byte
+	err := r.pool.QueryRow(ctx,
+		`SELECT session_id, principal_id, credential_id, kind, authority_level, authentication_method,
+		        asserted_by_principal_id, metadata, created_at, expires_at, last_seen, revoked_at
+		 FROM gatehouse_sessions WHERE session_id = $1`,
+		uuidToText(id),
+	).Scan(&sessionIDText, &principalIDText, &credentialIDText, &kind, &authorityLevel, &authMethod,
+		&assertedByText, &metadata, &s.CreatedAt, &s.ExpiresAt, &s.LastSeen, &s.RevokedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return structure.Session{}, false, nil
+		}
+		return structure.Session{}, false, fmt.Errorf("dbstore: get session: %w", err)
+	}
+	if s.SessionID, err = parseUUID(sessionIDText); err != nil {
+		return structure.Session{}, false, fmt.Errorf("dbstore: parse session_id: %w", err)
+	}
+	if s.PrincipalID, err = parseUUID(principalIDText); err != nil {
+		return structure.Session{}, false, fmt.Errorf("dbstore: parse principal_id: %w", err)
+	}
+	if s.CredentialID, err = parseNullableUUID(credentialIDText); err != nil {
+		return structure.Session{}, false, fmt.Errorf("dbstore: parse credential_id: %w", err)
+	}
+	if s.AssertedByPrincipalID, err = parseNullableUUID(assertedByText); err != nil {
+		return structure.Session{}, false, fmt.Errorf("dbstore: parse asserted_by_principal_id: %w", err)
+	}
+	s.Kind = structure.SessionKind(kind)
+	s.AuthorityLevel = structure.AuthorityLevel(authorityLevel)
+	s.AuthenticationMethod = structure.AuthenticationMethod(authMethod)
+	s.Metadata = metadata
+	return s, true, nil
+}
+
 func (r *PostgresReader) GetPermissionDefinition(ctx context.Context, key string) (structure.PermissionDefinition, bool, error) {
 	var def structure.PermissionDefinition
 	err := r.pool.QueryRow(ctx,

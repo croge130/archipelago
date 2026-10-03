@@ -16,6 +16,7 @@ import (
 	"github.com/croge130/archipelago/gatehouse-core/evaluation"
 	"github.com/croge130/archipelago/gatehouse-core/storage/dbstore"
 	"github.com/croge130/archipelago/gatehouse-core/structure"
+	"github.com/google/uuid"
 )
 
 func setupFacadeTest(t *testing.T) (Reader, Writer) {
@@ -177,5 +178,47 @@ func TestGrantPermissionAndEvaluateEndToEnd(t *testing.T) {
 
 	if err := evaluation.RequirePermission(ctx, reader, principal.PrincipalID, "myapp.readinglist.read"); err != nil {
 		t.Fatalf("expected the end-to-end facade flow (EnsurePrincipal -> RegisterPermission -> GrantPermission -> RequirePermission) to allow, got: %v", err)
+	}
+}
+
+func TestCreateSessionAndRevoke(t *testing.T) {
+	reader, writer := setupFacadeTest(t)
+	ctx := context.Background()
+
+	p, err := EnsurePrincipal(ctx, reader, writer, "service.gamebridge", structure.PrincipalTypeServiceAccount)
+	if err != nil {
+		t.Fatalf("EnsurePrincipal: %v", err)
+	}
+
+	s, err := CreateSession(ctx, writer, structure.Session{
+		PrincipalID:          p.PrincipalID,
+		Kind:                 structure.SessionKindService,
+		AuthorityLevel:       structure.AuthorityLevelStandard,
+		AuthenticationMethod: "mtls_certificate",
+	})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	if s.SessionID == uuid.Nil {
+		t.Fatal("expected CreateSession to assign a SessionID")
+	}
+
+	got, found, err := reader.GetSession(ctx, s.SessionID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if !found || got.RevokedAt != nil {
+		t.Fatalf("expected a freshly created session to be found and not revoked, got %+v found=%v", got, found)
+	}
+
+	if err := RevokeSession(ctx, writer, s.SessionID); err != nil {
+		t.Fatalf("RevokeSession: %v", err)
+	}
+	got, found, err = reader.GetSession(ctx, s.SessionID)
+	if err != nil {
+		t.Fatalf("GetSession: %v", err)
+	}
+	if !found || got.RevokedAt == nil {
+		t.Fatalf("expected the session to be revoked, got %+v found=%v", got, found)
 	}
 }
