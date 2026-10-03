@@ -12,6 +12,7 @@ use (
 	./peerauth
 	./policy
 	./sessions
+	./sso
 	./transit
 	./transit/websocket
 	./typeconstraints
