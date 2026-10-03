@@ -18,5 +18,6 @@ use (
 	./transit/websocket
 	./typeconstraints
 	./typedvalue
+	./vitals
 	./wire
 )
