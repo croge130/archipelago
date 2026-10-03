@@ -63,7 +63,7 @@ for the full model.
 
 ## Layer 1 — independent bases
 
-These five do not depend on each other. Each is buildable, testable, and
+These six do not depend on each other. Each is buildable, testable, and
 individually useful with nothing else in this document existing yet.
 
 | Base | What it is | Needs |
@@ -73,6 +73,7 @@ individually useful with nothing else in this document existing yet.
 | **Cert-store / PKI** | CSR handling, CA signing, enrollment records | DB only (+ eventually a `Signer` backend — vTPM/HSM/YubiKey, decided later, swappable) |
 | **Transit (raw)** | WT/WS backends, delivery classes, byte-level peer identity extraction (`PeerIdentity()`) — decomposes into `wire` (shared envelope model) + `transit` (Session/Channel/Backend interfaces and backends), see [`11-transit-model.md`](11-transit-model.md) | Nothing — moving bytes between two processes doesn't need a DB, Gatehouse, or certs |
 | **Alias** | Table + name → opaque target value, with its own lifecycle (active/released), never load-bearing | DB only |
+| **Vitals** | Current-condition records — definitions/instances/readings/history/groups, ported from Lighthouse's own Vitals design (`lighthouse-docs/lighthouse_vitals_subsystem_supplement_v1.md`) and adapted to this topology, see [`14-vitals-model.md`](14-vitals-model.md) | DB only — useful for a single process with no peers, same as Alias |
 
 Transit's `PeerIdentity()` extraction is pure crypto against whatever cert
 is presented — it can be tested with a throwaway self-signed cert long
@@ -113,6 +114,8 @@ depends on both — never by one base importing the other directly.
 | **Cert-as-credential** | Gatehouse-core + Cert-store | Only if the credential model treats a certificate as a credential type — a real coupling to decide on purpose, not an accident |
 | **Sessions** | Gatehouse-core (+ Transit, for connection-bound sessions specifically) | AuthoritySession tied to a principal, optionally to a live connection |
 | **Alias authorization** | Alias + Gatehouse-core | *Who's allowed* to create, resolve, or release a given alias entry — Alias itself resolves a name with no opinion on this; this integration is what a caller reaches for the moment it needs one |
+| **Vitals authorization** | Vitals + Gatehouse-core | *Who's allowed* to read/write a reading or manage a definition/group — Vitals' own scope field is a bare `(ContextType, ContextID)` pair, reused directly as a Gatehouse-core Context; same shape as Alias authorization |
+| **Vitals default-group resolution** | Vitals + Policy | Resolves a scope's default Vitals group via a Policy pointer, reusing the *same* `(ContextType, ContextID)` pair as a Policy `Ref` — the scope identity never needs a vocabulary of its own; see [`14-vitals-model.md`](14-vitals-model.md) |
 
 ## Layer 3 — compound features
 
@@ -122,7 +125,7 @@ These need Layer 2 integrations, not just Layer 1 bases directly.
 |---|---|---|
 | **SSO ticket issuance/verification** | Gatehouse-core + Cert-store (dedicated signing key, *not* the mTLS key) + Transit for delivery | Audience-bound, identity-only, short-lived — see [`12-sso-tickets-model.md`](12-sso-tickets-model.md) |
 | **Multi-instance coordination** (peer discovery, broadcast, locks) | Transit + Gatehouse-core (registry/grouping concept) | See [`03-multi-instance-and-suites.md`](03-multi-instance-and-suites.md) and [`13-registry-and-leases-model.md`](13-registry-and-leases-model.md) |
-| **Status/health aggregation** | Policy (aggregation-policy pointer) + Transit (propagation envelope) + the same registry/grouping concept | Group definition holds a policy pointer; each computed rollup snapshots the resolved value |
+| **Status/health aggregation** | Vitals (groups + default-group policy pointer) + the registry/grouping concept, Transit only if a remote instance's reading needs delivering to wherever it's stored | Narrowed from an earlier draft: Vitals' own Group + policy-pointer mechanism (previous row) already *is* the rollup/overview substrate — each computed reading is just a Vitals reading written against a shared scope, snapshotting whatever policy value produced it; there's no separate aggregation engine to build |
 | **Endpoint self-advertisement** | Gatehouse-core (permission metadata declared at registration) + the registry | The thing that replaces a hand-maintained allowlist with a real source of truth |
 | **Admin/destructive-action key enrollment** | Cert-store (CSR+CA signing) + an out-of-band confirmation path (CLI) | Deliberately *not* gated by the same signed-request mechanism as app-level dangerous actions — machine access to the backend already implies broader trust than that mechanism would add |
 | **Trace/log aggregation** | Transit (propagation envelope's trace-context field) + the same registry/grouping concept Multi-instance coordination uses | What a coordinator/Viewer uses to stitch events from multiple instances into one causal story — a consumer of existing infrastructure, not new plumbing; see [`06-logging-and-observability.md`](06-logging-and-observability.md) |
@@ -155,12 +158,14 @@ flowchart TB
         PKI["Cert-store / PKI"]
         TR["Transit (raw)"]
         ALIAS["Alias"]
+        VITALS["Vitals"]
     end
 
     DB --> GH
     DB --> POL
     DB --> PKI
     DB --> ALIAS
+    DB --> VITALS
 
     subgraph L2["Layer 2 — pairwise integrations"]
         direction LR
@@ -169,6 +174,8 @@ flowchart TB
         CREDCERT["Cert-as-credential"]
         SESS["Sessions"]
         ALIASAUTH["Alias authorization"]
+        VITALSAUTH["Vitals authorization"]
+        VITALSDEFAULTS["Vitals default-group resolution"]
     end
 
     TR --> MTLS
@@ -182,6 +189,10 @@ flowchart TB
     TR -.-> SESS
     ALIAS --> ALIASAUTH
     GH --> ALIASAUTH
+    VITALS --> VITALSAUTH
+    GH --> VITALSAUTH
+    VITALS --> VITALSDEFAULTS
+    POL --> VITALSDEFAULTS
 
     subgraph L3["Layer 3 — compound features"]
         direction LR
@@ -198,8 +209,7 @@ flowchart TB
     TR --> SSO
     MTLS --> MULTI
     PEERAUTH --> MULTI
-    POL --> STATUS
-    TR --> STATUS
+    VITALSDEFAULTS --> STATUS
     MULTI -.shared grouping.-> STATUS
     GH --> ENDPOINT
     PKI --> ADMINKEY
