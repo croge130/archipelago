@@ -371,3 +371,24 @@ func (w *PostgresWriter) ReleaseLease(ctx context.Context, group, name string, h
 	}
 	return nil
 }
+
+// RegisterEndpointDefinition inserts a new endpoint definition — a raw
+// insert; facade.RegisterEndpoint decides key idempotency and the
+// RequiredPermissionKey cross-check before calling this, the same
+// split RegisterPermissionDefinition's own caller uses. No generation
+// bump: unlike a permission or grant, registering an endpoint doesn't
+// change any evaluation outcome, only what gets listed.
+func (w *PostgresWriter) RegisterEndpointDefinition(ctx context.Context, def structure.EndpointDefinition) error {
+	if err := def.Validate(); err != nil {
+		return err
+	}
+	_, err := w.pool.Exec(ctx,
+		`INSERT INTO gatehouse_endpoint_definitions (endpoint_key, description, required_permission_key, metadata)
+		 VALUES ($1, $2, $3, $4)`,
+		def.EndpointKey, def.Description, def.RequiredPermissionKey, nullableJSON(def.Metadata),
+	)
+	if err != nil {
+		return fmt.Errorf("dbstore: register endpoint definition: %w", err)
+	}
+	return nil
+}

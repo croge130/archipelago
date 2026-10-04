@@ -21,6 +21,8 @@ type Reader interface {
 	GetSession(ctx context.Context, id uuid.UUID) (structure.Session, bool, error)
 	GetInstance(ctx context.Context, instanceID uuid.UUID) (structure.Instance, bool, error)
 	ListInstancesByGroup(ctx context.Context, group string, activeSince time.Time) ([]structure.Instance, error)
+	GetEndpointDefinition(ctx context.Context, key string) (structure.EndpointDefinition, bool, error)
+	ListEndpointDefinitions(ctx context.Context) ([]structure.EndpointDefinition, error)
 }
 
 // Writer is every mutation the facade drives. Moved here from
@@ -44,4 +46,5 @@ type Writer interface {
 	DeleteInstance(ctx context.Context, instanceID uuid.UUID) error
 	AcquireOrRenewLease(ctx context.Context, group, name string, holderInstanceID uuid.UUID, acquiredAt, expiresAt time.Time) (structure.Lease, bool, error)
 	ReleaseLease(ctx context.Context, group, name string, holderInstanceID uuid.UUID) error
+	RegisterEndpointDefinition(ctx context.Context, def structure.EndpointDefinition) error
 }

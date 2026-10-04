@@ -431,3 +431,49 @@ func (r *PostgresReader) GetLease(ctx context.Context, group, name string) (stru
 	}
 	return l, true, nil
 }
+
+// GetEndpointDefinition looks up a registered endpoint by key. found
+// is false if the key isn't registered at all.
+func (r *PostgresReader) GetEndpointDefinition(ctx context.Context, key string) (structure.EndpointDefinition, bool, error) {
+	var def structure.EndpointDefinition
+	var metadata []byte
+	err := r.pool.QueryRow(ctx,
+		`SELECT endpoint_key, description, required_permission_key, metadata
+		 FROM gatehouse_endpoint_definitions WHERE endpoint_key = $1`,
+		key,
+	).Scan(&def.EndpointKey, &def.Description, &def.RequiredPermissionKey, &metadata)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return structure.EndpointDefinition{}, false, nil
+		}
+		return structure.EndpointDefinition{}, false, fmt.Errorf("dbstore: get endpoint definition: %w", err)
+	}
+	def.Metadata = metadata
+	return def, true, nil
+}
+
+// ListEndpointDefinitions returns every registered endpoint — the
+// same registration data GetEndpointDefinition reads, never a second,
+// separately-maintained list.
+func (r *PostgresReader) ListEndpointDefinitions(ctx context.Context) ([]structure.EndpointDefinition, error) {
+	rows, err := r.pool.Query(ctx,
+		`SELECT endpoint_key, description, required_permission_key, metadata
+		 FROM gatehouse_endpoint_definitions ORDER BY endpoint_key`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("dbstore: list endpoint definitions: %w", err)
+	}
+	defer rows.Close()
+
+	defs := []structure.EndpointDefinition{}
+	for rows.Next() {
+		var def structure.EndpointDefinition
+		var metadata []byte
+		if err := rows.Scan(&def.EndpointKey, &def.Description, &def.RequiredPermissionKey, &metadata); err != nil {
+			return nil, fmt.Errorf("dbstore: scan endpoint definition: %w", err)
+		}
+		def.Metadata = metadata
+		defs = append(defs, def)
+	}
+	return defs, rows.Err()
+}

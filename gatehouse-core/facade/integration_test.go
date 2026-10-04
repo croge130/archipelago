@@ -47,7 +47,7 @@ func setupFacadeTest(t *testing.T) (Reader, Writer) {
 		gatehouse_password_credentials, gatehouse_token_credentials,
 		gatehouse_totp_credentials, gatehouse_passkey_credentials,
 		gatehouse_mtls_certificate_credentials, gatehouse_credentials,
-		gatehouse_leases, gatehouse_instances,
+		gatehouse_leases, gatehouse_instances, gatehouse_endpoint_definitions,
 		gatehouse_principals, gatehouse_permission_definitions,
 		gatehouse_contexts, gatehouse_context_types, gatehouse_templates,
 		gatehouse_authority_generation
@@ -344,5 +344,150 @@ func TestAcquireOrRenewLeaseAndRelease(t *testing.T) {
 	}
 	if _, ok, err := AcquireOrRenewLease(ctx, writer, "gamebridge.workers", "reconciler", rival.InstanceID, time.Minute); err != nil || !ok {
 		t.Fatalf("expected the rival to acquire the released lease, got ok=%v err=%v", ok, err)
+	}
+}
+
+func TestRegisterEndpointRejectsUnregisteredPermission(t *testing.T) {
+	reader, writer := setupFacadeTest(t)
+	ctx := context.Background()
+
+	err := RegisterEndpoint(ctx, reader, writer, structure.EndpointDefinition{
+		EndpointKey: "myapp.importer.run", RequiredPermissionKey: "myapp.importer.write",
+	}, RegisterEndpointOptions{})
+	if !errors.Is(err, ErrPermissionNotRegistered) {
+		t.Fatalf("expected ErrPermissionNotRegistered when RequiredPermissionKey was never registered, got: %v", err)
+	}
+}
+
+func TestRegisterEndpointAllowsNoPermissionRequired(t *testing.T) {
+	reader, writer := setupFacadeTest(t)
+	ctx := context.Background()
+
+	if err := RegisterEndpoint(ctx, reader, writer, structure.EndpointDefinition{
+		EndpointKey: "myapp.health.check",
+	}, RegisterEndpointOptions{}); err != nil {
+		t.Fatalf("expected a public endpoint with no RequiredPermissionKey to register, got: %v", err)
+	}
+}
+
+func TestRegisterEndpointIsIdempotentIncludingNilMetadata(t *testing.T) {
+	reader, writer := setupFacadeTest(t)
+	ctx := context.Background()
+
+	def := structure.EndpointDefinition{EndpointKey: "myapp.health.check", Description: "liveness"}
+	if err := RegisterEndpoint(ctx, reader, writer, def, RegisterEndpointOptions{}); err != nil {
+		t.Fatalf("first RegisterEndpoint: %v", err)
+	}
+	// Same definition again, Metadata still nil on this call too — must
+	// stay a no-op even though the stored row's own metadata column
+	// round-tripped nil to the literal "{}" on the first insert; a
+	// naive equality check comparing those raw bytes would wrongly see
+	// this as a conflict. See sameEndpointDefinition's doc comment.
+	if err := RegisterEndpoint(ctx, reader, writer, def, RegisterEndpointOptions{}); err != nil {
+		t.Fatalf("second RegisterEndpoint with the identical definition (nil Metadata both times): %v", err)
+	}
+
+	conflicting := def
+	conflicting.Description = "something else entirely"
+	if err := RegisterEndpoint(ctx, reader, writer, conflicting, RegisterEndpointOptions{}); !errors.Is(err, ErrConflict) {
+		t.Fatalf("expected ErrConflict re-registering %q with a different definition, got: %v", def.EndpointKey, err)
+	}
+}
+
+func TestRegisterEndpointBlocksReservedNamespaceByDefault(t *testing.T) {
+	reader, writer := setupFacadeTest(t)
+	ctx := context.Background()
+
+	err := RegisterEndpoint(ctx, reader, writer, structure.EndpointDefinition{
+		EndpointKey: "gatehouse.principal.delete",
+	}, RegisterEndpointOptions{})
+	if err == nil {
+		t.Fatal("expected RegisterEndpoint to block a reserved namespace by default")
+	}
+}
+
+func TestListEndpointsReturnsEveryRegistration(t *testing.T) {
+	reader, writer := setupFacadeTest(t)
+	ctx := context.Background()
+
+	if err := RegisterEndpoint(ctx, reader, writer, structure.EndpointDefinition{EndpointKey: "myapp.health.check"}, RegisterEndpointOptions{}); err != nil {
+		t.Fatalf("RegisterEndpoint (health.check): %v", err)
+	}
+	if err := RegisterPermission(ctx, reader, writer, structure.PermissionDefinition{
+		PermissionKey: "myapp.importer.write", RequiredAuthorityLevel: structure.AuthorityLevelStandard,
+	}, RegisterPermissionOptions{}); err != nil {
+		t.Fatalf("RegisterPermission: %v", err)
+	}
+	if err := RegisterEndpoint(ctx, reader, writer, structure.EndpointDefinition{
+		EndpointKey: "myapp.importer.run", RequiredPermissionKey: "myapp.importer.write",
+	}, RegisterEndpointOptions{}); err != nil {
+		t.Fatalf("RegisterEndpoint (importer.run): %v", err)
+	}
+
+	got, err := ListEndpoints(ctx, reader)
+	if err != nil {
+		t.Fatalf("ListEndpoints: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("ListEndpoints = %+v, want 2 registered endpoints", got)
+	}
+}
+
+func TestAdvertiseEndpointsFiltersByGrant(t *testing.T) {
+	reader, writer := setupFacadeTest(t)
+	ctx := context.Background()
+
+	principal, err := EnsurePrincipal(ctx, reader, writer, "user.christian", structure.PrincipalTypeUser)
+	if err != nil {
+		t.Fatalf("EnsurePrincipal: %v", err)
+	}
+	if err := RegisterEndpoint(ctx, reader, writer, structure.EndpointDefinition{EndpointKey: "myapp.health.check"}, RegisterEndpointOptions{}); err != nil {
+		t.Fatalf("RegisterEndpoint (health.check): %v", err)
+	}
+	if err := RegisterPermission(ctx, reader, writer, structure.PermissionDefinition{
+		PermissionKey: "myapp.importer.write", RequiredAuthorityLevel: structure.AuthorityLevelStandard,
+	}, RegisterPermissionOptions{}); err != nil {
+		t.Fatalf("RegisterPermission: %v", err)
+	}
+	if err := RegisterEndpoint(ctx, reader, writer, structure.EndpointDefinition{
+		EndpointKey: "myapp.importer.run", RequiredPermissionKey: "myapp.importer.write",
+	}, RegisterEndpointOptions{}); err != nil {
+		t.Fatalf("RegisterEndpoint (importer.run): %v", err)
+	}
+
+	// filterByGrant=false: the show-all-and-deny-at-call-time posture —
+	// both endpoints, regardless of what the principal is actually
+	// allowed to call.
+	all, err := AdvertiseEndpoints(ctx, reader, principal.PrincipalID, false)
+	if err != nil {
+		t.Fatalf("AdvertiseEndpoints (unfiltered): %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("AdvertiseEndpoints(filterByGrant=false) = %+v, want both endpoints", all)
+	}
+
+	// filterByGrant=true, no grant yet: only the public endpoint with
+	// no RequiredPermissionKey is visible.
+	visible, err := AdvertiseEndpoints(ctx, reader, principal.PrincipalID, true)
+	if err != nil {
+		t.Fatalf("AdvertiseEndpoints (filtered, no grant): %v", err)
+	}
+	if len(visible) != 1 || visible[0].EndpointKey != "myapp.health.check" {
+		t.Fatalf("AdvertiseEndpoints(filterByGrant=true) with no grant = %+v, want only myapp.health.check", visible)
+	}
+
+	// Grant the permission the other endpoint requires: now both are
+	// visible, through the exact same evaluator RequirePermission
+	// itself uses — no separate advertisement-specific authorization
+	// path to drift from it.
+	if _, err := GrantPermission(ctx, writer, structure.GrantSubjectTypePrincipal, principal.PrincipalID, "myapp.importer.write"); err != nil {
+		t.Fatalf("GrantPermission: %v", err)
+	}
+	visible, err = AdvertiseEndpoints(ctx, reader, principal.PrincipalID, true)
+	if err != nil {
+		t.Fatalf("AdvertiseEndpoints (filtered, after grant): %v", err)
+	}
+	if len(visible) != 2 {
+		t.Fatalf("AdvertiseEndpoints(filterByGrant=true) after granting myapp.importer.write = %+v, want both endpoints", visible)
 	}
 }
