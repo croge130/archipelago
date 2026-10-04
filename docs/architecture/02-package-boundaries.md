@@ -212,7 +212,7 @@ flowchart TB
     subgraph Integrations["Layer 2/3 — each imports only what it needs"]
         direction LR
         MTLS["mtls<br/>(transit + certstore)"]
-        PEERAUTH["peerauth<br/>(transit + gatehouse-core)"]
+        PEERAUTH["peerauth<br/>(transit + gatehouse-core;<br/>+policy not yet built, see 01-build-order.md)"]
         SSO["sso<br/>(gatehouse-core + certstore + transit)"]
         ALIASAUTH["aliasauth<br/>(alias + gatehouse-core)"]
     end
@@ -221,6 +221,7 @@ flowchart TB
     CS --> MTLS
     TR --> PEERAUTH
     GHCore --> PEERAUTH
+    POL -.policy-gated auto-provisioning, not yet built.-> PEERAUTH
     GHCore --> SSO
     CS --> SSO
     TR --> SSO

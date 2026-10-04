@@ -110,7 +110,7 @@ depends on both — never by one base importing the other directly.
 | Integration | Needs | What it adds |
 |---|---|---|
 | **mTLS** | Transit + Cert-store | Real cert-backed `PeerIdentity()`, not a throwaway test cert |
-| **Peer authorization** | Transit + Gatehouse-core | "Does this verified peer's identity resolve to a principal with this grant" — `peerauth.ResolvePrincipal` + `evaluation.RequirePermission`, nothing from Policy; the `(+ Policy)` this row once carried never became a real import and has been dropped |
+| **Peer authorization** | Transit + Gatehouse-core (+ Policy, not yet built) | "Does this verified peer's identity resolve to a principal with this grant" — `peerauth.ResolvePrincipal` + `evaluation.RequirePermission` today, neither touching Policy. The `(+ Policy)` names `09-gatehouse-core-model.md`'s policy-gated mTLS auto-provisioning exception (first contact from an already-enrolled cert); `peerauth`'s own doc comment points at it and deliberately declines to implement it — that's a caller's own `EnsureMTLSCredential` trigger, not something this package does, and nothing calls into Policy for the gate yet either |
 | **Cert-as-credential** | Gatehouse-core + Cert-store | Only if the credential model treats a certificate as a credential type — a real coupling to decide on purpose, not an accident |
 | **Sessions** | Gatehouse-core (+ Transit, for connection-bound sessions specifically) | AuthoritySession tied to a principal, optionally to a live connection |
 | **Alias authorization** | Alias + Gatehouse-core | *Who's allowed* to create, resolve, or release a given alias entry — Alias itself resolves a name with no opinion on this; this integration is what a caller reaches for the moment it needs one |
@@ -182,6 +182,7 @@ flowchart TB
     PKI --> MTLS
     TR --> PEERAUTH
     GH --> PEERAUTH
+    POL -.policy-gated auto-provisioning, not yet built.-> PEERAUTH
     GH --> CREDCERT
     PKI --> CREDCERT
     GH --> SESS
