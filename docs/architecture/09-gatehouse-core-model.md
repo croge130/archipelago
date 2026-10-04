@@ -92,6 +92,7 @@ PrincipalRecord
 - key               stable human-oriented key
 - display_name
 - type              user | agent | service_account | system | external | anonymous
+- owner_principal_id?   attestation-rights input, see below; never self-referencing
 - metadata          opaque, never authorized on
 - created_at / ... 
 ```
@@ -144,8 +145,17 @@ principal first proves who it is** (an authentication *method*) and
 
 ```text
 methods:    password | totp | passkey | sso_assertion
-credentials: session_token | mtls_certificate | system
+credentials: password | totp | passkey | session_token | mtls_certificate
 ```
+
+(Password/TOTP/passkey end up as both a method *and* a stored
+`CredentialKind` — there's a secret or public-key record to keep and
+re-verify against on every subsequent request, unlike `sso_assertion`,
+which produces a session directly with nothing of its own to store.
+`session_token` is what password/passkey login additionally mints for
+bearer use afterward. No `system` credential kind exists — that word
+names a `PrincipalType`, not a `CredentialKind`; an earlier draft of
+this list conflated the two.)
 
 This lines up with what's already decided elsewhere: local-first login
 (password+TOTP, passkeys) via composable primitives
@@ -311,7 +321,7 @@ Exact-match only, deliberately — no hierarchy, no policy conditions, the
 same restraint Lighthouse kept even after real production use:
 
 ```text
-ContextType    type_key (namespaced, e.g. myapp.readinglist), description, lifecycle
+ContextType    type_key (namespaced, e.g. myapp.readinglist), description
 Context        context_type + context_id, lifecycle
 ```
 

@@ -148,15 +148,23 @@ discipline, and discipline alone doesn't hold at scale.
 
 ### Enforcing it
 
+- **Separate Go modules, one per base and one per integration,** is
+  what actually enforces this today — see
+  [`08-repo-scaffolding.md`](08-repo-scaffolding.md)'s "Integrations
+  turned out to want modules too." A module's `go.mod` simply has no
+  `require` line for something it isn't supposed to depend on; the
+  rule below is checked by the compiler, not by a tool that has to be
+  built and kept running in CI.
 - **`internal/` packages** restrict who's even allowed to import
   something, when the goal is "no one outside this module" rather than
-  "no one, period."
-- **A `go list`-based CI check (or a tool like `go-arch-lint`)** can assert
-  a rule at the base level — "nothing under the `gatehouse-core/...` tree
-  may import anything under `transit/...`" — rather than needing to name
-  exact package paths, which is what makes this survive `gatehouse-core`
-  turning out to be several packages rather than one. Worth setting up
-  once the Layer 1 boundaries are real, not deferred indefinitely.
+  "no one, period." Still useful *within* one module for the question
+  module boundaries don't answer — see below.
+- **A `go list`-based CI check (or a tool like `go-arch-lint`)**, if
+  ever built, would target that same narrower, still-open question:
+  discipline within one module's own internal packages (e.g. keeping
+  `gatehouse-core/structure` from reaching into
+  `gatehouse-core/storage/dbstore`'s internals) — not the base/
+  integration boundary, which module separation already covers.
 
 ## Facades live inside their base, unless they need something extra
 
@@ -204,7 +212,7 @@ flowchart TB
     subgraph Integrations["Layer 2/3 — each imports only what it needs"]
         direction LR
         MTLS["mtls<br/>(transit + certstore)"]
-        PEERAUTH["peerauth<br/>(transit + gatehouse-core + policy)"]
+        PEERAUTH["peerauth<br/>(transit + gatehouse-core)"]
         SSO["sso<br/>(gatehouse-core + certstore + transit)"]
         ALIASAUTH["aliasauth<br/>(alias + gatehouse-core)"]
     end
@@ -213,7 +221,6 @@ flowchart TB
     CS --> MTLS
     TR --> PEERAUTH
     GHCore --> PEERAUTH
-    POL -.-> PEERAUTH
     GHCore --> SSO
     CS --> SSO
     TR --> SSO

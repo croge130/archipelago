@@ -79,38 +79,50 @@ real experience to design it from, not hypothetical need.
 
 ## Status and health: per-instance and collective
 
-Per-instance status and a rolled-up collective view are both needed, and
-neither replaces the other — the same two-tier model Kubernetes
-(Pod → Deployment) and Consul (per-check → service-level, with a
-configurable aggregation policy) already use.
+*Superseded by what actually got built — kept here for the per-
+instance-vs-collective framing, which still holds, not for the
+mechanism below, which doesn't.* Per-instance status and a rolled-up
+collective view are both needed, and neither replaces the other — the
+same two-tier model Kubernetes (Pod → Deployment) and Consul
+(per-check → service-level) already use. This section originally
+proposed a dedicated "status group" with a configurable aggregation
+rule (all/any/threshold) resolved via a Policy pointer. `01-build-order.md`
+later narrowed that, and [`14-vitals-model.md`](14-vitals-model.md)
+built the actual mechanism: there's no separate status-group concept
+and no aggregation-rule engine at all — a coordinator computes its own
+rollup however its own code decides to, and writes it as an ordinary
+Vitals `Reading` against a shared-scope `Instance`, discovered via
+`vitalsdefaults`' Policy-pointer resolution
+(`vitals.default_group`). The pointer-not-value and snapshot-what-was-
+used reasoning below carried through into that design unchanged; only
+the "dedicated engine with a configurable rule" idea didn't survive.
 
-- **The aggregation policy is a pointer, not an embedded value**, on the
-  status group's own definition — same reasoning as Lighthouse's §6
-  alias-default-table design: repointing/changing the default should not
-  require rewriting every group record, and the general Policy system's
-  inheritance/override machinery already does this for free.
+- **The aggregation policy is a pointer, not an embedded value** —
+  repointing/changing the default shouldn't require rewriting every
+  group record, and Policy's own inheritance/override machinery
+  already does this for free; see `vitalsdefaults`.
 - **Each computed rollup snapshots the policy value it actually used** —
   the `copied_at_creation` pattern, applied to a status computation
-  instead of a resource's creation-time config. The group stays flexible
-  and repointable; each individual result stays an honest historical
-  record of what was actually used to produce it.
-- Reports ride the same generic propagation envelope (`kind`, `source`,
-  `idempotency_key`, `seq`, `payload`) and the `Event/Push` delivery
-  class already designed — this is a consumer of existing infrastructure,
-  not a new subsystem.
+  instead of a resource's creation-time config. The group stays
+  flexible and repointable; each individual reading stays an honest
+  historical record of what was actually used to produce it.
+- Reports ride `wire.Message` (`type`, `payload`, `id`, `kind`,
+  `channel`, trace-context fields — see `11-transit-model.md`) and the
+  `Event/Push` delivery class already designed — this is a consumer
+  of existing infrastructure, not a new subsystem.
 
 ```mermaid
 flowchart LR
-    I1["Instance 1<br/>reports own status"]
-    I2["Instance 2<br/>reports own status"]
-    I3["Instance 3<br/>reports own status"]
-    GROUP["Status group<br/>(holds a policy pointer, not a value)"]
-    POL["Policy: aggregation rule<br/>(all / any / threshold — configurable)"]
-    ROLLUP["Computed rollup<br/>(snapshots the resolved policy value used)"]
+    I1["Instance 1<br/>computes its own rollup"]
+    I2["Instance 2<br/>reports its own Reading"]
+    I3["Instance 3<br/>reports its own Reading"]
+    POL["Policy: vitals.default_group<br/>(a pointer, not a value)"]
+    GROUP["Vitals Group<br/>(resolved via the pointer)"]
+    READING["Coordinator writes its own computed<br/>Reading against a shared-scope Instance —<br/>snapshots whatever the pointer resolved to"]
 
-    I1 -- "Event/Push" --> GROUP
-    I2 -- "Event/Push" --> GROUP
-    I3 -- "Event/Push" --> GROUP
-    GROUP -- "resolves against" --> POL
-    GROUP --> ROLLUP
+    I1 -- "Event/Push" --> READING
+    I2 -- "Event/Push" --> READING
+    I3 -- "Event/Push" --> READING
+    READING -- "resolved via" --> POL
+    POL -- "points at" --> GROUP
 ```
