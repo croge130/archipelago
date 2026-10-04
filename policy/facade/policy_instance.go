@@ -29,6 +29,15 @@ import (
 // real overlap check is a real feature to build later if this
 // restriction ever actually bites someone, not a bug to fix now.
 //
+// The exclusivity check itself runs through
+// Writer.CreatePolicyInstanceExclusive, not a separate read-then-write
+// here — see that method's own doc comment for the concurrency bug a
+// naive check-then-create would reintroduce. Updating an *existing*
+// instance's value (the branch just below) stays an ordinary read-
+// then-write: last-write-wins under a genuine race there is benign
+// (no invariant to violate, just whichever update actually lands),
+// unlike creating a second instance where one shouldn't exist at all.
+//
 // clamp controls what happens when value fails def.Constraints: false
 // rejects it outright; true coerces a numeric value into bounds via
 // Constraints.Clamp instead (see typeconstraints.Set.Clamp).
@@ -84,19 +93,6 @@ func SetPolicyInstance(
 		return inst, nil
 	}
 
-	if targetKind != structure.TargetKindGlobal && !def.Merge.Commutative() {
-		others, err := r.ActiveNonGlobalInstances(ctx, def.PolicyDefinitionID)
-		if err != nil {
-			return structure.PolicyInstance{}, fmt.Errorf("facade: set policy instance: %w", err)
-		}
-		if len(others) > 0 {
-			return structure.PolicyInstance{}, fmt.Errorf(
-				"facade: set policy instance: merge_mode %q is non-commutative and %d other active override(s) already exist for this definition; archive them first",
-				def.Merge, len(others),
-			)
-		}
-	}
-
 	inst := structure.PolicyInstance{
 		PolicyInstanceID:   uuid.New(),
 		PolicyDefinitionID: def.PolicyDefinitionID,
@@ -111,6 +107,27 @@ func SetPolicyInstance(
 		CreatedAt:          now,
 		UpdatedAt:          now,
 	}
+
+	// Non-commutative merge modes go through the atomic exclusive-create
+	// path — a separate "check others, then create" here would be the
+	// exact TOCTOU race UpsertGroupMember's own cycle check had to be
+	// hardened against: two concurrent creates for different new
+	// targets under the same definition could each see "no others
+	// exist" against the other's pre-commit state and both succeed.
+	if targetKind != structure.TargetKindGlobal && !def.Merge.Commutative() {
+		ok, err := w.CreatePolicyInstanceExclusive(ctx, inst)
+		if err != nil {
+			return structure.PolicyInstance{}, fmt.Errorf("facade: set policy instance: %w", err)
+		}
+		if !ok {
+			return structure.PolicyInstance{}, fmt.Errorf(
+				"facade: set policy instance: merge_mode %q is non-commutative and another active override already exists for this definition; archive it first",
+				def.Merge,
+			)
+		}
+		return inst, nil
+	}
+
 	if err := w.CreatePolicyInstance(ctx, inst); err != nil {
 		return structure.PolicyInstance{}, fmt.Errorf("facade: set policy instance: %w", err)
 	}

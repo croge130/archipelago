@@ -9,6 +9,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"sync"
 	"testing"
 
 	archidb "github.com/croge130/archipelago/db"
@@ -240,6 +241,54 @@ func TestSetPolicyInstanceEnforcesExclusivityForOverrideMode(t *testing.T) {
 	if _, err := SetPolicyInstance(ctx, reader, writer, def, structure.TargetKindRef, &refA, nil,
 		99, structure.BindingInheritedLive, "operator:christian", false); err != nil {
 		t.Fatalf("expected updating the existing sole override to succeed, got: %v", err)
+	}
+}
+
+// TestSetPolicyInstanceConcurrentExclusivityNeverBothSucceed is the
+// actual race Writer.CreatePolicyInstanceExclusive's advisory lock
+// exists to close: two goroutines concurrently creating two different
+// brand-new targets under the same non-commutative definition must
+// never both succeed — a naive "check others, then create" could let
+// each see "no others exist" against the other's pre-commit state.
+func TestSetPolicyInstanceConcurrentExclusivityNeverBothSucceed(t *testing.T) {
+	reader, writer := setupFacadeTest(t)
+	ctx := context.Background()
+	def := ensureMaxRequestsDef(t, ctx, reader, writer, typeconstraints.MergeOverride)
+
+	refA := structure.Ref{Kind: "service", Key: "gamebridge"}
+	refB := structure.Ref{Kind: "service", Key: "torrent"}
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, errs[0] = SetPolicyInstance(ctx, reader, writer, def, structure.TargetKindRef, &refA, nil,
+			10, structure.BindingInheritedLive, "operator:christian", false)
+	}()
+	go func() {
+		defer wg.Done()
+		_, errs[1] = SetPolicyInstance(ctx, reader, writer, def, structure.TargetKindRef, &refB, nil,
+			20, structure.BindingInheritedLive, "operator:christian", false)
+	}()
+	wg.Wait()
+
+	succeeded := 0
+	for _, err := range errs {
+		if err == nil {
+			succeeded++
+		}
+	}
+	if succeeded != 1 {
+		t.Fatalf("expected exactly one of the two concurrent creates to succeed, got %d (errs: %v)", succeeded, errs)
+	}
+
+	others, err := reader.ActiveNonGlobalInstances(ctx, def.PolicyDefinitionID)
+	if err != nil {
+		t.Fatalf("ActiveNonGlobalInstances: %v", err)
+	}
+	if len(others) != 1 {
+		t.Fatalf("expected exactly one active non-global instance to have landed, got %d", len(others))
 	}
 }
 

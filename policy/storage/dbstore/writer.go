@@ -7,8 +7,17 @@ import (
 
 	"github.com/croge130/archipelago/policy/structure"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
+
+// execer is satisfied by both *pgxpool.Pool and pgx.Tx — the small
+// interface that lets upsertPolicyInstance run either as a standalone
+// statement or as one step inside CreatePolicyInstanceExclusive's own
+// transaction, without duplicating the INSERT/UPDATE SQL.
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
 
 // PostgresWriter implements facade.Writer directly against Postgres.
 // The Writer interface itself is declared in facade, its consumer,
@@ -99,17 +108,67 @@ func (w *PostgresWriter) CreatePolicyInstance(ctx context.Context, i structure.P
 	if err := i.Validate(); err != nil {
 		return err
 	}
-	return w.upsertPolicyInstance(ctx, i, true)
+	return upsertPolicyInstance(ctx, w.pool, i, true)
 }
 
 func (w *PostgresWriter) UpdatePolicyInstance(ctx context.Context, i structure.PolicyInstance) error {
 	if err := i.Validate(); err != nil {
 		return err
 	}
-	return w.upsertPolicyInstance(ctx, i, false)
+	return upsertPolicyInstance(ctx, w.pool, i, false)
 }
 
-func (w *PostgresWriter) upsertPolicyInstance(ctx context.Context, i structure.PolicyInstance, insert bool) error {
+// CreatePolicyInstanceExclusive is CreatePolicyInstance's atomic
+// counterpart for the non-commutative-merge exclusivity rule
+// SetPolicyInstance enforces: the "is there already another active
+// non-global instance for this definition" check and the insert run
+// inside one transaction, serialized against every other concurrent
+// CreatePolicyInstanceExclusive call for the SAME PolicyDefinitionID
+// by an advisory lock taken first (a different definition's calls
+// never contend with this one). Without this, two concurrent calls
+// creating different new instances under the same non-commutative
+// definition could each see "no others exist" against the other's
+// pre-commit state and both succeed — violating the exact invariant
+// the check exists to enforce, the same class of race
+// UpsertGroupMember's own lock closes for Vitals' group-membership
+// cycles. ok is false, with no error, when another active non-global
+// instance already exists.
+func (w *PostgresWriter) CreatePolicyInstanceExclusive(ctx context.Context, i structure.PolicyInstance) (bool, error) {
+	if err := i.Validate(); err != nil {
+		return false, err
+	}
+
+	tx, err := w.pool.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("dbstore: create policy instance exclusive: begin: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, i.PolicyDefinitionID.String()); err != nil {
+		return false, fmt.Errorf("dbstore: create policy instance exclusive: acquire lock: %w", err)
+	}
+
+	var count int
+	if err := tx.QueryRow(ctx,
+		`SELECT count(*) FROM policy_instances WHERE policy_definition_id = $1 AND target_kind != 'global' AND lifecycle = 'active'`,
+		i.PolicyDefinitionID,
+	).Scan(&count); err != nil {
+		return false, fmt.Errorf("dbstore: create policy instance exclusive: count: %w", err)
+	}
+	if count > 0 {
+		return false, nil
+	}
+
+	if err := upsertPolicyInstance(ctx, tx, i, true); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("dbstore: create policy instance exclusive: commit: %w", err)
+	}
+	return true, nil
+}
+
+func upsertPolicyInstance(ctx context.Context, exec execer, i structure.PolicyInstance, insert bool) error {
 	valueJSON, err := json.Marshal(i.Value)
 	if err != nil {
 		return fmt.Errorf("dbstore: marshal value: %w", err)
@@ -120,7 +179,7 @@ func (w *PostgresWriter) upsertPolicyInstance(ctx context.Context, i structure.P
 	}
 
 	if insert {
-		_, err = w.pool.Exec(ctx,
+		_, err = exec.Exec(ctx,
 			`INSERT INTO policy_instances
 			   (policy_instance_id, policy_definition_id, target_kind, ref_kind, ref_key, policy_context_id,
 			    value, binding_mode, lifecycle, metadata, created_by, updated_by, created_at, updated_at)
@@ -129,7 +188,7 @@ func (w *PostgresWriter) upsertPolicyInstance(ctx context.Context, i structure.P
 			valueJSON, string(i.Binding), string(i.Lifecycle), nullableJSON(i.Metadata), i.CreatedBy, i.UpdatedBy, i.CreatedAt, i.UpdatedAt,
 		)
 	} else {
-		_, err = w.pool.Exec(ctx,
+		_, err = exec.Exec(ctx,
 			`UPDATE policy_instances SET
 			   value = $2, binding_mode = $3, lifecycle = $4, metadata = $5, updated_by = $6, updated_at = $7
 			 WHERE policy_instance_id = $1`,

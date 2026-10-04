@@ -299,6 +299,15 @@ count, and the two non-commutative modes get the one rule that actually
 matches why they're non-commutative — at most one active source, checked
 when a write would create a second, not resolved by ranking at read time.
 
+That check and the write it guards run inside one transaction
+(`Writer.CreatePolicyInstanceExclusive`), serialized per
+`PolicyDefinitionID` by a `pg_advisory_xact_lock` taken first — not a
+separate read-then-write at the facade layer. Two concurrent creates
+for different new targets under the same non-commutative definition
+could otherwise each see "no others exist" against the other's
+pre-commit state and both succeed, which is exactly the invariant this
+rule exists to prevent in the first place.
+
 ## Generation and freshness
 
 `policy_generation` — the counter `09-gatehouse-core-model.md` already
