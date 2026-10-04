@@ -24,6 +24,7 @@ var defaultReservedNamespaces = map[string]bool{
 	"certstore":   true,
 	"transit":     true,
 	"alias":       true,
+	"vitals":      true,
 }
 
 // RegisterPermissionOptions controls RegisterPermission's defaults.
