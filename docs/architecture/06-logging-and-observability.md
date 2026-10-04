@@ -89,21 +89,26 @@ design for before there's a real case driving it.
 
 ## Transit carries correlation for free
 
-The propagation envelope already designed for Transit (`kind`, `source`,
-`idempotency_key`, `seq`, `payload`) gets one more field: trace context
-(trace ID + span ID, W3C Trace Context-shaped). Every message that
-crosses a process boundary through Transit — peer traffic, status
-reports, SSO delivery, anything — carries correlation data as a side
-effect of using Transit at all, with nothing extra to remember to
-instrument.
+`wire.Message` (the envelope Transit actually ships — `type`, `payload`,
+`id`, `kind`, `channel`, per [`11-transit-model.md`](11-transit-model.md))
+carries three more optional fields: `TraceID`/`SpanID`/`ParentSpanID`
+(hex, W3C Trace Context-shaped), additive exactly like `id`/`channel`
+already are. Every message that crosses a process boundary through
+Transit — peer traffic, status reports, SSO delivery, anything — *can*
+carry correlation data this way, with nothing extra to remember to
+instrument, as long as the caller sets it; propagation isn't automatic
+or forced, the same "additive, opt-in" property `id`/`channel` have.
 
 This is what makes the thing a coordinator/Viewer will eventually want —
 stitching together events that happened across several instances into
 one causal story — possible without a second, separate correlation
-mechanism. It rides the same infrastructure Status/health aggregation
-already uses (see [`03-multi-instance-and-suites.md`](03-multi-instance-and-suites.md)):
-a Layer 3 feature that consumes Transit's envelope and the registry's
-grouping concept, not new plumbing of its own.
+mechanism. It's one half of [`16-trace-log-aggregation-model.md`](16-trace-log-aggregation-model.md)'s
+Layer 3 feature: that pass found this field hadn't actually been built
+yet (this section once claimed it had), added it to `wire.Message`
+plus a small opt-in capture buffer here in `logging`, and built the
+actual cross-instance collector — genuinely new plumbing, not a
+composition of pre-existing pieces the way Status/health aggregation
+turned out to be.
 
 ## Severity
 

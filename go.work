@@ -14,6 +14,7 @@ use (
 	./registry
 	./sessions
 	./sso
+	./traceagg
 	./transit
 	./transit/websocket
 	./typeconstraints
