@@ -19,5 +19,6 @@ use (
 	./typeconstraints
 	./typedvalue
 	./vitals
+	./vitalsauth
 	./wire
 )
