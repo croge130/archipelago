@@ -155,6 +155,46 @@ permission check into `Verify` itself would blur "identity-only" back
 into "sometimes also authorization," the same anti-pattern the field
 shape already rules out above.
 
+The whole lifecycle, issuer and relying party as two different
+processes, each with its own `Verify` call — nothing here is a single
+in-process function call, which is easy to lose sight of in the
+numbered-checklist form above:
+
+```mermaid
+flowchart TB
+    subgraph ISSUER["Issuing process"]
+        REQ["Caller asks: issue a ticket for<br/>subjectPrincipalID, bound to audience"]
+        LOOKUP{"subjectPrincipalID<br/>names a real principal?"}
+        REJECT1["Error — refuse to vouch<br/>for something that doesn't exist"]
+        SIGN["Sign {SubjectPrincipalID, Audience,<br/>IssuedAt, ExpiresAt} with the<br/>dedicated SSO signing key<br/>(never the mTLS key)"]
+        DELIVER["Hand the ticket's JSON to an<br/>already-open transit.Session<br/>as an ordinary wire.Message"]
+    end
+
+    subgraph RP["Relying party process"]
+        RECV["Receives the ticket over its own<br/>transit.Session/Channel"]
+        SIG{"Signature valid<br/>against the issuer's cert?"}
+        WINDOW{"now within<br/>[IssuedAt, ExpiresAt]?<br/>(small clock-skew allowance)"}
+        AUD{"Audience ==<br/>expectedAudience?<br/>(exact match, no wildcard)"}
+        RESOLVE{"SubjectPrincipalID<br/>resolves via GetPrincipal?"}
+        DENY["Error — named failure mode<br/>per check, same explainability<br/>discipline as Evaluate's DenialReason"]
+        OK["Returns the resolved Principal —<br/>caller still runs its own<br/>RequirePermission/RequireContextPermission;<br/>Verify stops at identity, never authorizes"]
+    end
+
+    REQ --> LOOKUP
+    LOOKUP -- "no" --> REJECT1
+    LOOKUP -- "yes" --> SIGN --> DELIVER
+    DELIVER -.->|"over the wire"| RECV
+    RECV --> SIG
+    SIG -- "no" --> DENY
+    SIG -- "yes" --> WINDOW
+    WINDOW -- "no (expired/not yet valid)" --> DENY
+    WINDOW -- "yes" --> AUD
+    AUD -- "no" --> DENY
+    AUD -- "yes" --> RESOLVE
+    RESOLVE -- "no" --> DENY
+    RESOLVE -- "yes" --> OK
+```
+
 ## Delivery
 
 Transit's role is exactly what the build-order row says and nothing

@@ -282,6 +282,38 @@ override always wins regardless of what groups it's in" gets that by
 choosing `override` mode and relying on the write-time exclusivity rule
 below, not by Policy secretly ranking attachment kinds.
 
+`Resolve`'s actual gather-then-merge shape — nothing here ranks a
+source over another; every applicable value is collected first, and
+only `merge_mode`'s own math decides the result:
+
+```mermaid
+flowchart TB
+    START["Resolve(policyKey, refs)"]
+    DEF{"PolicyDefinition<br/>registered?"}
+    ERR["Error: unknown policy key<br/>(a caller mistake, not 'nothing set yet')"]
+    GLOBAL["Global instance,<br/>if active"]
+    REFS["Instances directly targeting<br/>a Ref in the set, if active"]
+    CTX["Instances targeting a PolicyContext<br/>any Ref belongs to, if active"]
+    EXCL{"Non-commutative merge_mode<br/>(override/object_merge) with<br/>more than one override?"}
+    VIOLATION["Error: write-time exclusivity<br/>was violated (belt-and-suspenders —<br/>CreatePolicyInstanceExclusive should<br/>have already prevented this)"]
+    EMPTY{"Any value<br/>gathered at all?"}
+    NOTFOUND["found=false — nothing configured,<br/>a valid state, not an error"]
+    MERGE["typeconstraints.Merge(merge_mode,<br/>[global, ...overrides])<br/>— global ordered first, so override<br/>mode's 'last value wins' already gives<br/>scope-specific-beats-global for free"]
+    RESULT["Resolution{Value, ContributingInstanceIDs}"]
+
+    START --> DEF
+    DEF -- "no" --> ERR
+    DEF -- "yes" --> GLOBAL
+    GLOBAL --> REFS
+    REFS --> CTX
+    CTX --> EXCL
+    EXCL -- "yes" --> VIOLATION
+    EXCL -- "no" --> EMPTY
+    EMPTY -- "no" --> NOTFOUND
+    EMPTY -- "yes" --> MERGE
+    MERGE --> RESULT
+```
+
 ### Multiple applicable instances: commutative modes merge, others need exclusivity
 
 | `merge_mode` | Commutative/associative | Multiple simultaneous instances |

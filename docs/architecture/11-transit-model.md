@@ -103,6 +103,42 @@ consumer wants lossy delivery; every delivery need identified so far
 ("tell a peer something happened, no reply, can't be dropped") is
 `Event/Push`, not `Signal`.
 
+Which `Session`/`Channel` method a handler calls *is* the delivery-class
+choice — the backend never infers intent from the message, the caller
+states it up front by which method it reaches for:
+
+```mermaid
+flowchart TB
+    INTENT{"What does the handler need?"}
+    RR["Session.Reply(msg)<br/>correlated by msg.id"]
+    EP["Session.Push(msg)<br/>no reply expected"]
+    CS["Channel.Send(msg)<br/>on an already-OpenChannel'd Channel"]
+    SIG["(Signal — deferred, no method yet:<br/>every real need so far is Event/Push)"]
+
+    RRG["Request/Response:<br/>per-id order, reliable, frame-capped"]
+    EPG["Event/Push:<br/>per-channel order, reliable, frame-capped"]
+    CSG["Channel/Stream:<br/>per-channel order, reliable, streamed —<br/>not frame-capped, the one class built for size"]
+
+    WSR["WebSocket: inline correlated reply"]
+    WST["WebTransport: bidi/control stream"]
+    WSE["WebSocket: reliable non-blocking push"]
+    WTE["WebTransport: unidirectional stream"]
+    WSC["WebSocket: logical mux channel"]
+    WTC["WebTransport: QUIC stream"]
+
+    INTENT -- "needs a reply" --> RR --> RRG
+    INTENT -- "fire an event,<br/>no reply, can't drop" --> EP --> EPG
+    INTENT -- "long-lived, ordered,<br/>possibly large" --> CS --> CSG
+    INTENT -. "lossy OK<br/>(no consumer yet)" .-> SIG
+
+    RRG --> WSR
+    RRG -.-> WST
+    EPG --> WSE
+    EPG -.-> WTE
+    CSG --> WSC
+    CSG -.-> WTC
+```
+
 ## Interfaces
 
 ```go

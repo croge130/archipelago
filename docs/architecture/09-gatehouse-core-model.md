@@ -475,6 +475,39 @@ Reporting which allow grant(s) *would* have matched too is a cheap
 addition (the same evaluation pass already computes both sets) but
 isn't required for the decision to be correct or explainable.
 
+`Evaluate`'s real shape — gathering every candidate grant before
+matching any of them, so deny-always-wins has the full set to check
+against rather than short-circuiting on the first allow it happens to
+find:
+
+```mermaid
+flowchart TB
+    START["Evaluate(principal, permissionKey, ...)"]
+    DEF{"PermissionDefinition<br/>registered?"}
+    NOPERM["Deny: no_matching_permission"]
+    GATHER["gatherCandidates:<br/>principal's direct grants<br/>+ every group's grants<br/>+ role-target grants expanded<br/>into their own entries"]
+    MATCH["Keep candidates whose scope<br/>and permission pattern match<br/>(wildcard or exact)"]
+    DENYCHECK{"Any deny<br/>candidate matched?"}
+    DENY["Deny: deny_grant_matched<br/>(names the deny grant —<br/>no specificity comparison at all)"]
+    ALLOWCHECK{"Any allow<br/>candidate matched?"}
+    NOGRANT["Deny: no_matching_grant"]
+    AUTHLEVEL{"Session's AuthorityLevel<br/>meets the permission's<br/>RequiredAuthorityLevel?"}
+    INSUFFICIENT["Deny: authority_level_insufficient<br/>(names the allow grant that<br/>matched anyway — distinct from<br/>'nothing granted this at all')"]
+    ALLOW["Allow (names the matched grant)"]
+
+    START --> DEF
+    DEF -- "no" --> NOPERM
+    DEF -- "yes" --> GATHER
+    GATHER --> MATCH
+    MATCH --> DENYCHECK
+    DENYCHECK -- "yes" --> DENY
+    DENYCHECK -- "no" --> ALLOWCHECK
+    ALLOWCHECK -- "no" --> NOGRANT
+    ALLOWCHECK -- "yes" --> AUTHLEVEL
+    AUTHLEVEL -- "no" --> INSUFFICIENT
+    AUTHLEVEL -- "yes" --> ALLOW
+```
+
 **The trade-off, named honestly:** a broad deny can no longer have a
 narrower allow carved out as an exception to it (deny a group from
 everything, then allow one principal anyway) — once any deny matches,

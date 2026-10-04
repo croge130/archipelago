@@ -110,6 +110,23 @@ codebase (alias's own `UpsertAlias` conflict handling, grants' active-row
 checks) — Postgres is already transactional; there's nothing to
 reimplement in Go.
 
+The one `INSERT ... ON CONFLICT ... WHERE ...` statement decides all
+three outcomes — first acquisition, renewal by the same holder, and a
+rival's rejection — with no branch in Go at all:
+
+```mermaid
+flowchart TB
+    CALL["AcquireOrRenewLease(group, name, instanceID, ttl)"]
+    SQL["INSERT ... ON CONFLICT (group, name) DO UPDATE<br/>SET holder_instance_id, acquired_at, expires_at<br/>WHERE gatehouse_leases.expires_at &lt; EXCLUDED.acquired_at<br/>   OR gatehouse_leases.holder_instance_id = EXCLUDED.holder_instance_id<br/>RETURNING ..."]
+    ROW{"No existing row,<br/>OR existing row expired,<br/>OR existing row's holder == instanceID?"}
+    ACQUIRED["Row returned — ok=true<br/>(fresh acquisition, renewal by the<br/>same holder, or takeover of an<br/>expired lease — all one code path)"]
+    REJECTED["No row returned — ok=false, err=nil<br/>(WHERE was false: held by someone<br/>else and not expired — 'not acquired'<br/>is a normal result, not an error)"]
+
+    CALL --> SQL --> ROW
+    ROW -- "yes" --> ACQUIRED
+    ROW -- "no" --> REJECTED
+```
+
 **No background expiry sweep here either.** An expired lease is simply
 acquirable by the next caller that asks — there's nothing to clean up
 for correctness, only for tidiness, and tidiness isn't a requirement
@@ -157,3 +174,16 @@ wrappers directly over Gatehouse-core's own facade — identity resolution
 is the one thing this integration genuinely adds; lock/discovery
 mechanics belong to Gatehouse-core's own storage once an `Instance`'s
 identity is established.
+
+```mermaid
+flowchart TB
+    SESSION["transit.Session<br/>(already mTLS-verified by Transit/mTLS)"]
+    RESOLVE["peerauth.ResolvePrincipal(session)<br/>— the same chokepoint peerauth.Require itself uses"]
+    FOUND{"Peer cert resolves to<br/>a known principal?"}
+    FAIL["Error — never register an Instance<br/>for a caller-asserted PrincipalID<br/>with no transport-level backing"]
+    STORE["gatehouseFacade.RegisterInstance(principalID, group, metadata)<br/>— fresh InstanceID every call (a restarted<br/>process is a new instance), Gatehouse-core's<br/>own facade; this package adds identity<br/>resolution only, not storage mechanics"]
+
+    SESSION --> RESOLVE --> FOUND
+    FOUND -- "no" --> FAIL
+    FOUND -- "yes" --> STORE
+```

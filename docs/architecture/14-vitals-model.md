@@ -401,6 +401,30 @@ this codebase carries — see `GroupMember`'s own concurrency note below
 for why that class of race is tolerated elsewhere but a *recurring*
 one on every write would not have been.
 
+```mermaid
+flowchart TB
+    subgraph FACADE["facade.WriteReading (no locking needed — reads only)"]
+        LOOKUP["Look up reading.InstanceID's<br/>Instance and Definition"]
+        NORMALIZE["evaluation.NormalizeAndValidateValue(def, reading.Value)<br/>— mandatory whenever Definition.ValueMetadata is set,<br/>see 'Runtime validation' below; a type error here<br/>never reaches the transaction at all"]
+        EXPECTED["expectedStates := ExpectedStatesOrDefault(instance, def)"]
+    end
+
+    subgraph ATOMIC["Writer.WriteReadingAtomic — one transaction"]
+        BEGIN["BEGIN"]
+        LOCK["SELECT previous reading ... FOR UPDATE<br/>(blocks a concurrent writer to the<br/>*same* InstanceID until this commits;<br/>no row yet on a brand-new instance —<br/>the one accepted first-write gap)"]
+        DECIDE["QualityWarnings(reading, expectedStates)<br/>Revision = previous.Revision + 1, or 1 if none"]
+        UPSERT["upsertReading (current row)"]
+        NOTABLE{"IsNotableTransition(previous, reading)?"}
+        HIST["insertHistory"]
+        COMMIT["COMMIT — releases the lock"]
+    end
+
+    LOOKUP --> NORMALIZE --> EXPECTED --> BEGIN
+    BEGIN --> LOCK --> DECIDE --> UPSERT --> NOTABLE
+    NOTABLE -- "yes" --> HIST --> COMMIT
+    NOTABLE -- "no" --> COMMIT
+```
+
 This base deliberately does not enforce "exactly one writer per
 instance" at the schema level — nothing here prevents two services from
 racing to report the same `InstanceID`, only guarantees the race
