@@ -218,6 +218,13 @@ differently; see
 | `07-config-formats-and-templating.md` | Why XML/HCL/TOML split by content shape, HCL as declarative "ensure this exists" templates over the same facade API |
 | `08-repo-scaffolding.md` | The actual directory/module layout enforcing the base/integration boundaries — what's decided now vs. still open |
 | `09-gatehouse-core-model.md` | What Principal/Credential/Grant/Context/Session/Role/Group actually are — what's confirmed vs. loosely proposed |
+| `10-typedvalue-and-policy-model.md` | typedvalue's dimension/unit/prefix model, typeconstraints, Policy's definition/instance/resolution shape and merge-mode math |
+| `11-transit-model.md` | The wire/transit split, delivery classes, Session/Channel/Backend interfaces, what's deferred (Router, WebTransport) |
+| `12-sso-tickets-model.md` | Audience-bound, identity-only, short-lived tickets — field shape, signing, issuance, verification, delivery |
+| `13-registry-and-leases-model.md` | Peer discovery and lease-based locks — Instance/Lease live in Gatehouse-core, `registry` adds Transit-authenticated identity resolution |
+| `14-vitals-model.md` | Current-condition records (Definition/Instance/Reading/History/Group), adapted from Lighthouse's own Vitals; concurrency and ValueMetadata validation |
+| `15-endpoint-advertisement-model.md` | Endpoints register themselves once; advertisement is a live, permission-filtered query over the same data |
+| `16-trace-log-aggregation-model.md` | Trace context riding on `wire.Message`, an opt-in capture buffer in `logging`, and `traceagg`'s cross-instance collector |
 
 Config format split, settled and not up for relitigating without a new
 concrete reason: **XML** for document-shaped content (docs, dashboards),

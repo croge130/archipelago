@@ -39,6 +39,15 @@ repos' modules are at different points in their lifecycle.
 
 ## The layout
 
+This section originally described a layout decided *before any real
+code existed* — `integrations/` as one package tree inside a shared
+module, a `tools/archlint/` CI check to police its boundaries. Neither
+survived contact with actually building ten-plus integrations; see
+"Integrations turned out to want modules too" below for what changed
+and why. What follows is the layout as it actually exists, flat at the
+repo root, one `go.mod` per dependency unit — base or integration,
+no distinction in kind, only in which `require` lines each one has:
+
 ```text
 archipelago/
   go.work                    # local dev workspace only; each module still
@@ -49,119 +58,163 @@ archipelago/
     architecture/             # this doc set
 
   logging/                   # Layer 0 — own module, zero Archipelago-internal
-                              # deps. Severity levels, structured attributes,
-                              # trace/span/Resource types, sink interface.
+                              # deps (other than being imported by everything
+                              # above it). Severity levels, structured
+                              # attributes, trace/span/Resource types, an
+                              # opt-in in-memory capture buffer for export.
 
   db/                        # Layer 0 — own module, zero Archipelago-internal
                               # deps. Connection/pool + migration runner that
                               # every base's storage layer depends on.
 
+  typedvalue/                # Layer 0 — own module. Dimension/prefix/unit/
+                              # Definition: typed-value metadata, no DB.
+  typeconstraints/            # Layer 0 — own module, depends one-way on
+                              # typedvalue only. Set/MergeMode/Merge.
+
+  wire/                      # Layer 1 base — own module. The envelope
+                              # itself (Message/Kind/DeliveryClass/channel
+                              # ids, trace-context fields) — not nested
+                              # inside transit; transit depends on it.
+  transit/                   # Layer 1 base — own module, depends on wire.
+                              # Session/Channel/Backend interfaces.
+    inmem/                      # loopback backend — no sockets, for tests
+                                 # and anything built on Session before a
+                                 # real backend's socket concerns matter
+    websocket/                   # the real network backend (coder/websocket)
+
   gatehouse-core/             # Layer 1 base — own module
-    structure/                 # principals, credentials, grants: types only
+    structure/                 # principals, credentials, grants, Instance/
+                                 # Lease, Session: types only
     evaluation/                 # authority checks; depends on structure +
                                  # the Store interface, never a concrete impl
     storage/
       dbstore/                   # today's Store implementation; depends on db/
+    facade/                     # Ensure*/Register*/Require* convenience
+                                 # calls over evaluation + storage
 
-  policy/                     # Layer 1 base — own module, same shape
-    structure/
-    evaluation/
-    storage/
-      dbstore/
-
+  policy/                     # Layer 1 base — own module, same
+                                 structure/evaluation/storage/facade shape
   certstore/                  # Layer 1 base — own module, same shape
-    structure/
-    evaluation/
-    storage/
-      dbstore/
-
   alias/                      # Layer 1 base — own module, same shape
-    structure/
-    evaluation/
-    storage/
-      dbstore/
+  vitals/                     # Layer 1 base — own module, same shape
 
-  transit/                    # Layer 1 base — own module; no structure/
-                               # evaluation/storage split (not obviously the
-                               # same shape — see 02-package-boundaries.md)
-    wt/                          # WebTransport backend
-    ws/                          # WebSocket backend
-    envelope/                    # generic propagation envelope, trace-context field
+  # Layer 2/3 integrations — each its own module, same shape as a base's
+  # (no module-vs-package distinction between the two; see below)
+  mtls/                       # Transit + certstore
+  peerauth/                   # Transit + gatehouse-core
+  certcred/                   # gatehouse-core + certstore
+  sessions/                   # gatehouse-core + Transit
+  aliasauth/                  # alias + gatehouse-core
+  sso/                        # gatehouse-core + certstore + Transit
+  registry/                   # gatehouse-core (Instance/Lease) + peerauth
+  vitalsauth/                 # vitals + gatehouse-core
+  vitalsdefaults/             # vitals + policy
+  traceagg/                   # Transit + wire + logging (not registry
+                                 # directly — see 16-trace-log-aggregation-
+                                 # model.md for why)
 
-  integrations/                # Layer 2/3 — packages, not separate modules,
-                                # to start (see below)
-    mtls/
-    peerauth/
-    credcert/
-    sessions/
-    aliasauth/
-    sso/
-    multiinstance/
-    status/
-    endpoint/
-    adminkey/
-    traceagg/
-
-  sdk/                         # own module — the composed, ergonomic surface
-                                # most apps import; depends on every base
-                                # module plus the integrations packages
+  sdk/                         # not yet built — the composed, ergonomic
+                                # surface most apps would import; depends
+                                # on every base module plus the integration
+                                # modules. See "Why the SDK module doesn't
+                                # defeat 'import only what you need'" below
+                                # — still the intended design, just unbuilt.
 
   cmd/
-    archipelago/                 # the CLI (key enrollment, alias admin, …);
-                                  # own module, depends on sdk/
-
-  tools/
-    archlint/                    # go-arch-lint config / go-list-based CI
-                                  # boundary check
+    archipelago/                 # not yet built — the CLI; would depend on sdk/
 ```
 
-Each Layer 1 base directory is its own `go.mod`, module path
-`github.com/croge130/archipelago/<name>` — the standard multi-module
-monorepo shape, same as Lighthouse's `pkg/*`.
+Each dependency unit — base or integration — is its own `go.mod`,
+module path `github.com/croge130/archipelago/<name>`. There's no
+longer a structural distinction in *kind* between a base and an
+integration's module; the only real difference is which other modules
+appear in its own `require` list, exactly matching `01-build-order.md`'s
+own framing of "a dependency unit, not a claim about internal structure."
 
-## Integrations start as packages, not modules
+## Integrations turned out to want modules too
 
-Every Layer 2/3 integration (`mtls`, `peerauth`, `sso`, `aliasauth`, …) is
-its own *package* under `integrations/`, imported by whatever needs it —
-but not its own *module* yet. A module boundary is cheap to add later
-(move a directory, add a `go.mod`) and expensive to guess correctly now;
-promoting one to its own module only makes sense once something concrete
-wants, say, `mtls` + `transit` + `certstore` without pulling in the rest
-of `integrations/` or the `sdk` module's own dependency weight. Until
-that's a real case rather than a hypothetical one, keeping them as
-packages avoids a module-per-integration explosion for what are mostly
-small glue packages.
+The original plan (directly above, before this rewrite) kept every
+integration as a *package* under one `integrations/` directory inside
+a shared module, specifically to dodge "a module-per-integration
+explosion" — reasoning that a module boundary is cheap to add later and
+expensive to guess correctly now, so packages should be the default
+until something concrete needed otherwise. Ten integrations later, that
+reasoning didn't hold up against what was actually built:
+
+- **The cost side of the trade never materialized.** Every integration
+  module this project added was the same copy-paste-and-adjust
+  `go.mod` (a handful of `require`/`replace` lines), and `go.work`
+  erases the local-dev friction entirely — exactly the mechanism this
+  doc's own "Modules, not just packages" section above already
+  describes for bases. "Expensive to guess correctly now" was a real
+  worry before any module had actually been added; it wasn't one in
+  practice across ten real additions.
+- **The benefit side was underweighted.** A package-in-one-module
+  arrangement needs an external tool to stop `sso` from quietly
+  importing `aliasauth` — this doc's own "Enforcement" section named
+  `tools/archlint/` for exactly that job. That tool was never built.
+  Under the actual module-per-integration layout, the same guarantee
+  comes free from the compiler: an integration's `go.mod` simply has
+  no `require` line for a module it isn't supposed to touch. The
+  enforcement mechanism the original plan deferred to tooling, the
+  actual layout gets for nothing.
+- **Uniformity has its own value.** Every base is already its own
+  module; giving every integration the identical treatment means the
+  whole dependency graph in `01-build-order.md` is one shape throughout
+  — "a dependency unit" — rather than bases being modules and
+  integrations being packages-inside-something-else, two different
+  answers to the same question depending which layer you're looking at.
+
+This is a correction to match what was actually built and found
+superior, not a plan still being evaluated — the ten existing
+integration modules aren't getting consolidated back into a shared
+tree. A future integration follows the same pattern: its own directory,
+its own `go.mod`, `replace` directives for whichever bases (or other
+integrations — `registry` depends on `peerauth`) it actually needs.
 
 ## Why the SDK module doesn't defeat "import only what you need"
 
-The `sdk` module depends on every base and bundles the integrations —
-that's the point of it: it's the "I want the ergonomic, composed
-experience" entry point, not the minimal-footprint one. An app that
-genuinely wants only raw `transit`, or only `alias` with no authority
-model at all, imports that base module directly and never touches `sdk`.
-Both are the same underlying code, offered at two different levels of
-composition — nothing about one being convenient requires the other to
-stop being minimal.
+The `sdk` module, when it's built, depends on every base and every
+integration — that's the point of it: it's the "I want the ergonomic,
+composed experience" entry point, not the minimal-footprint one. An
+app that genuinely wants only raw `transit`, or only `alias` with no
+authority model at all, imports that base module directly and never
+touches `sdk`. Both are the same underlying code, offered at two
+different levels of composition — nothing about one being convenient
+requires the other to stop being minimal. Nothing in the module-per-
+integration correction above changes this design; `sdk` simply isn't
+built yet, and every integration module above is already independently
+importable exactly the way this section always intended.
 
 ## What's decided here vs. still open
 
-Decided: the module boundary sits at the base level: the
-structure/evaluation/storage sub-layout for the four bases it applies to;
-integrations as packages rather than modules, for now. **Still open,
-deliberately:** the exact internal decomposition of any base's
-`evaluation/` or `storage/` package once real code exists — e.g. whether
-`gatehouse-core/evaluation` itself splits into principal-evaluation and
-grant-evaluation sub-packages is a call for when there's a real evaluator
-to look at, not something to pre-guess from a directory tree.
+Decided: the module boundary sits at the dependency-unit level — every
+base and every integration gets its own module, no distinction in
+kind between them; the structure/evaluation/storage/facade sub-layout
+for the four bases it applies to (`gatehouse-core`, `policy`,
+`certstore`, `alias`, and now `vitals`). **Still open, deliberately:**
+the exact internal decomposition of any base's `evaluation/` or
+`storage/` package (e.g. whether `gatehouse-core/evaluation` itself
+splits into principal-evaluation and grant-evaluation sub-packages is a
+call for when that split is actually needed, not something to pre-guess
+from a directory tree); and the `sdk`/`cmd/archipelago` layer, named
+above as intended but not yet built.
 
 ## Enforcement
 
-The `go list`/`go-arch-lint` check named in
-[`02-package-boundaries.md`](02-package-boundaries.md) belongs in
-`tools/archlint/`, run in CI against the module set above — asserting,
-concretely, that no base module's `go.mod` ever gains a `require` line
-for another base module, and that only `integrations/*` and `sdk` import
-more than one base at a time.
+The base/integration boundary enforcement `02-package-boundaries.md`'s
+"Enforcing it" section and this doc's own original "Enforcement"
+section both named a `go-arch-lint`-style CI check for is no longer a
+gap needing a tool: the module graph itself is the enforcement — no
+base or integration module's `go.mod` can gain a `require` line for
+something it isn't supposed to depend on without that line being
+visible, deliberate, and reviewable in a diff. A lint tool, if one is
+ever built, would target a narrower, still-open concern this doesn't
+cover: discipline *within* one module's own internal packages (e.g.
+keeping `gatehouse-core/structure` from reaching into
+`gatehouse-core/storage/dbstore`'s internals) — a real but smaller
+question than the one `tools/archlint/` was originally scoped for.
 
 ## DB-backed tests across a module's packages: run serially
 
