@@ -46,6 +46,13 @@ type RegisterPermissionOptions struct {
 // shape every caller actually wants for something meant to run at
 // every app startup. A second call with a different definition under
 // the same key is ErrConflict, not a silent redefinition.
+//
+// Known limitation, same as EnsurePrincipal's own: this is a read
+// then a write, not an atomic upsert, so two concurrent first-time
+// registrations of the same brand-new key can race (both see "not
+// found," one's INSERT then fails on the key's own uniqueness
+// constraint instead of returning the idempotent success a caller
+// expects).
 func RegisterPermission(ctx context.Context, reader Reader, writer Writer, def structure.PermissionDefinition, opts RegisterPermissionOptions) error {
 	if err := def.Validate(); err != nil {
 		return err

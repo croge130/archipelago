@@ -13,6 +13,10 @@ import (
 // already-existing key just returns the existing context unchanged —
 // Description is cosmetic, not something a second Ensure call
 // conflicts over the way EnsureAlias's Target does.
+//
+// Known limitation, same as EnsurePrincipal's own: this is a read
+// then a write, not an atomic upsert, so two concurrent first-time
+// Ensure calls for the same brand-new key can race.
 func EnsurePolicyContext(ctx context.Context, r Reader, w Writer, key, description string) (structure.PolicyContext, error) {
 	existing, found, err := r.GetPolicyContextByKey(ctx, key)
 	if err != nil {

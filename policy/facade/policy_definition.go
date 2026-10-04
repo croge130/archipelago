@@ -27,10 +27,15 @@ var ErrNotFound = errors.New("facade: not found")
 // EnsurePolicyDefinition is idempotent by PolicyKey: calling it again
 // with the identical shape is a no-op; calling it with a different
 // ValueType/Constraints/Merge/Activation/DefaultBinding is ErrConflict,
-// not a silent redefinition. Known limitation, same shape as
-// EnsureAlias's own: re-registering under a previously archived key is
-// also treated as ErrConflict for now rather than reactivation —
-// nothing yet needs the reactivation case, so it isn't built.
+// not a silent redefinition.
+//
+// Two known limitations, named rather than hidden:
+//   - Re-registering under a previously archived key is also treated
+//     as ErrConflict for now rather than reactivation — nothing yet
+//     needs the reactivation case, so it isn't built.
+//   - Same shape as EnsurePrincipal's own: this is a read then a
+//     write, not an atomic upsert, so two concurrent first-time
+//     registrations of the same brand-new key can race.
 func EnsurePolicyDefinition(
 	ctx context.Context, r Reader, w Writer,
 	policyKey string,

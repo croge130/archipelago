@@ -24,6 +24,13 @@ var ErrConflict = errors.New("facade: vitals: already exists with a different sh
 // caller may register a definition under any key outside the "vitals"
 // reserved namespace — this function has no concept of ownership at
 // all, per 14-vitals-model.md.
+//
+// Known limitation, shared with every other Ensure*-style facade
+// function in this codebase (EnsurePrincipal's own doc comment names
+// it first): this is a read then a write, not an atomic upsert, so
+// two concurrent first-time registrations of the same brand-new
+// key+version can race. EnsureInstance and EnsureGroup below carry the
+// identical shape and the identical caveat.
 func EnsureDefinition(ctx context.Context, reader Reader, writer Writer, d structure.Definition) (structure.Definition, error) {
 	existing, found, err := reader.GetDefinitionByKeyVersion(ctx, d.DefinitionKey, d.DefinitionVersion)
 	if err != nil {
