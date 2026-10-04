@@ -378,3 +378,47 @@ idempotency, history capture on notable transitions) — the same four-
 layer shape every other base in this project already uses. `vitalsauth`
 and `vitalsdefaults` follow as their own Layer 2 integrations once the
 base is real and tested, never built into Vitals' own facade.
+
+## Concurrency: multiple writers to the same Instance
+
+Vitals exists partly to let different services — and, within a
+service, different instances of it — advertise and report whatever
+vital types their own work needs. That means a Reading's write path
+can't assume it's the only writer for a given `InstanceID`, the way a
+narrower "one reporter per instance" design might.
+
+`WriteReading`'s real implementation, `Writer.WriteReadingAtomic`,
+reads the previous reading, computes the next Revision and quality
+warnings, upserts the current row, and conditionally inserts a history
+row, all inside one transaction with the previous row locked via
+`SELECT ... FOR UPDATE` for the duration. Two concurrent writers to the
+same instance serialize correctly — the second's read waits for the
+first's write to commit, so it always decides against the real current
+state, never a stale one. The one gap this doesn't close is a brand-new
+instance's very first write (there's no row yet to lock), which is the
+same accepted, first-moment-only race every `Ensure*`-style facade in
+this codebase carries — see `GroupMember`'s own concurrency note below
+for why that class of race is tolerated elsewhere but a *recurring*
+one on every write would not have been.
+
+This base deliberately does not enforce "exactly one writer per
+instance" at the schema level — nothing here prevents two services from
+racing to report the same `InstanceID`, only guarantees the race
+resolves consistently rather than corrupting state. Whether a given
+`InstanceID` *should* have one writer or many is a policy the caller
+imposes (typically: each instance owns and writes its own `Instance`,
+and a coordinator computes any fleet-wide rollup as its own write
+against a separate, coordinator-owned `Instance` — never multiple
+peers writing toward one shared row). `vitalsauth` (not yet built) is
+where that policy would actually get enforced, via whatever permission
+scoping a caller sets up for `vitals.write` against a given Instance's
+`(ScopeType, ScopeID)`; Vitals' own base layer has no opinion on it.
+
+`UpsertGroupMember`'s cycle check has the same shape of race for a
+different reason: two concurrent calls adding complementary group
+edges could each run the recursive cycle-check against the other's
+pre-commit state and both pass, writing an actual cycle into the data.
+Closed the same way — the check and the insert run inside one
+transaction, serialized this time by a `pg_advisory_xact_lock` (global,
+not per-group, since membership changes are rare administrative
+operations, not a hot path worth finer-grained locking for).

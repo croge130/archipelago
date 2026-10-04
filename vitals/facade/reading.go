@@ -6,32 +6,31 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/croge130/archipelago/vitals/evaluation"
 	"github.com/croge130/archipelago/vitals/structure"
-	"github.com/google/uuid"
 )
 
 // ErrInstanceNotFound is returned by WriteReading when reading's
 // InstanceID names no registered instance.
 var ErrInstanceNotFound = errors.New("facade: vitals: instance not found")
 
-// WriteReading is the one real read-then-write operation this base
-// has: it looks up reading.InstanceID's own Instance and Definition to
-// derive the expected-states set (structure.ExpectedStatesOrDefault),
-// runs evaluation.QualityWarnings against it, computes the next
-// Revision from whatever's currently stored, upserts the current
-// reading, and — if evaluation.IsNotableTransition says so — inserts a
-// history row. UpdatedAt is always set to now here, overriding
-// whatever the caller passed; ObservedAt stays the caller's own "when
-// I actually observed this" field, which can legitimately differ.
+// WriteReading looks up reading.InstanceID's own Instance and
+// Definition to derive the expected-states set
+// (structure.ExpectedStatesOrDefault), then delegates the actual
+// decide-and-write sequence — quality warnings, the next Revision,
+// the current-row upsert, and the conditional history insert — to
+// Writer.WriteReadingAtomic, which runs all of it inside one
+// transaction. See that method's own doc comment for why: a separate
+// read-then-decide-then-write here, the shape every other Ensure*-
+// style facade in this codebase accepts for a first-creation-only
+// race, would instead race on *every* write to the same instance,
+// silently overwriting readings and duplicating history rows with no
+// error signal — multi-instance reporting into shared Vitals state is
+// exactly the pattern this base exists to support, so that race isn't
+// a theoretical edge case here the way it is elsewhere.
 //
-// Known limitation, same shape as EnsureAlias/EnsurePrincipal's own:
-// this reads the previous reading and the next Revision, then writes,
-// without wrapping both in one transaction — two concurrent writes to
-// the same instance can race on Revision. Accepted for the same reason
-// those facades accept it: the common case (one reporter per
-// instance) doesn't hit it, and Vitals readings are liveness-shaped
-// data, not a security boundary that needs strict serialization.
+// UpdatedAt is always set to now here, overriding whatever the caller
+// passed; ObservedAt stays the caller's own "when I actually observed
+// this" field, which can legitimately differ.
 func WriteReading(ctx context.Context, reader Reader, writer Writer, reading structure.Reading) (structure.Reading, error) {
 	instance, found, err := reader.GetInstance(ctx, reading.InstanceID)
 	if err != nil {
@@ -49,29 +48,11 @@ func WriteReading(ctx context.Context, reader Reader, writer Writer, reading str
 	}
 
 	expectedStates := structure.ExpectedStatesOrDefault(instance, def)
-	reading.QualityWarnings = evaluation.QualityWarnings(reading, expectedStates)
+	reading.UpdatedAt = time.Now().Truncate(time.Microsecond)
 
-	previous, hadPrevious, err := reader.GetReading(ctx, reading.InstanceID)
+	written, err := writer.WriteReadingAtomic(ctx, reading, expectedStates)
 	if err != nil {
 		return structure.Reading{}, fmt.Errorf("facade: write reading: %w", err)
 	}
-	reading.Revision = 1
-	if hadPrevious {
-		reading.Revision = previous.Revision + 1
-	}
-	reading.UpdatedAt = time.Now().Truncate(time.Microsecond)
-
-	if err := reading.Validate(); err != nil {
-		return structure.Reading{}, fmt.Errorf("facade: write reading: %w", err)
-	}
-	if err := writer.UpsertReading(ctx, reading); err != nil {
-		return structure.Reading{}, fmt.Errorf("facade: write reading: %w", err)
-	}
-
-	if evaluation.IsNotableTransition(previous, reading, hadPrevious) {
-		if err := writer.InsertHistory(ctx, structure.HistoryEntry{HistoryID: uuid.New(), Reading: reading}); err != nil {
-			return structure.Reading{}, fmt.Errorf("facade: write reading: %w", err)
-		}
-	}
-	return reading, nil
+	return written, nil
 }

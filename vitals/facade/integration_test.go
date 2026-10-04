@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -313,6 +314,58 @@ func TestGroupMembershipRejectsCycle(t *testing.T) {
 	}
 }
 
+// TestGroupMembershipConcurrentComplementaryEdgesNeverBothSucceed is
+// the actual race UpsertGroupMember's advisory lock exists to close:
+// two goroutines concurrently adding complementary edges (A includes
+// B; B includes A) must never both succeed — without serialization,
+// each could run its cycle check against the other's pre-commit state
+// and both pass, writing a real cycle into the data despite the check.
+func TestGroupMembershipConcurrentComplementaryEdgesNeverBothSucceed(t *testing.T) {
+	reader, writer := setupTest(t)
+	ctx := context.Background()
+
+	a, err := EnsureGroup(ctx, reader, writer, structure.Group{ScopeType: "gatehouse.context", ScopeID: "myapp", GroupKey: "a"})
+	if err != nil {
+		t.Fatalf("EnsureGroup (a): %v", err)
+	}
+	b, err := EnsureGroup(ctx, reader, writer, structure.Group{ScopeType: "gatehouse.context", ScopeID: "myapp", GroupKey: "b"})
+	if err != nil {
+		t.Fatalf("EnsureGroup (b): %v", err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		errs[0] = SetGroupMember(ctx, writer, structure.GroupMember{
+			GroupID: a.GroupID, MemberKey: "b-ref", MemberKind: structure.MemberKindVitalGroup, ChildGroupID: &b.GroupID,
+		})
+	}()
+	go func() {
+		defer wg.Done()
+		errs[1] = SetGroupMember(ctx, writer, structure.GroupMember{
+			GroupID: b.GroupID, MemberKey: "a-ref", MemberKind: structure.MemberKindVitalGroup, ChildGroupID: &a.GroupID,
+		})
+	}()
+	wg.Wait()
+
+	succeeded := 0
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, dbstore.ErrGroupMembershipCycle):
+			// expected for whichever of the two loses the race
+		default:
+			t.Fatalf("unexpected error: %v", err)
+		}
+	}
+	if succeeded != 1 {
+		t.Fatalf("expected exactly one of the two complementary edges to succeed, got %d (errs: %v)", succeeded, errs)
+	}
+}
+
 func TestWriteReadingPreservesObservedAtSeparatelyFromUpdatedAt(t *testing.T) {
 	reader, writer := setupTest(t)
 	ctx := context.Background()
@@ -330,5 +383,68 @@ func TestWriteReadingPreservesObservedAtSeparatelyFromUpdatedAt(t *testing.T) {
 	}
 	if got.UpdatedAt.Equal(observed) || got.UpdatedAt.Before(observed) {
 		t.Fatalf("expected UpdatedAt to be set to now, independent of ObservedAt, got %v (observed %v)", got.UpdatedAt, observed)
+	}
+}
+
+// TestWriteReadingConcurrentWritesToSameInstanceSerializeCorrectly is
+// the actual race WriteReadingAtomic's SELECT ... FOR UPDATE exists to
+// close: two goroutines concurrently writing different new states for
+// the *same* instance, on top of an existing baseline reading, must
+// serialize into a consistent chain — revision 1 (baseline), then 2
+// and 3 in some order, never two writes both landing on the same
+// revision or either one silently vanishing. Without the fix, both
+// goroutines could read revision 1 as "previous," each compute
+// revision 2, and race on which one's write (and which one's history
+// row) actually survives.
+func TestWriteReadingConcurrentWritesToSameInstanceSerializeCorrectly(t *testing.T) {
+	reader, writer := setupTest(t)
+	ctx := context.Background()
+
+	def := ensureTestDefinition(t, ctx, reader, writer, "myapp.importer.status")
+	inst := ensureTestInstance(t, ctx, reader, writer, def, "myapp", "core.services.importer.status")
+
+	if _, err := WriteReading(ctx, reader, writer, structure.Reading{InstanceID: inst.InstanceID, State: structure.StateRunning}); err != nil {
+		t.Fatalf("WriteReading (baseline): %v", err)
+	}
+
+	var wg sync.WaitGroup
+	errs := make([]error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		_, errs[0] = WriteReading(ctx, reader, writer, structure.Reading{InstanceID: inst.InstanceID, State: structure.StateDegraded})
+	}()
+	go func() {
+		defer wg.Done()
+		_, errs[1] = WriteReading(ctx, reader, writer, structure.Reading{InstanceID: inst.InstanceID, State: structure.StateFailed})
+	}()
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("WriteReading (concurrent %d): %v", i, err)
+		}
+	}
+
+	final, found, err := reader.GetReading(ctx, inst.InstanceID)
+	if err != nil {
+		t.Fatalf("GetReading: %v", err)
+	}
+	if !found {
+		t.Fatal("expected a current reading to exist")
+	}
+	if final.Revision != 3 {
+		t.Fatalf("Revision = %d, want 3 (1 baseline + 2 correctly serialized concurrent writes)", final.Revision)
+	}
+	if final.State != structure.StateDegraded && final.State != structure.StateFailed {
+		t.Fatalf("expected the final state to be whichever concurrent write landed last, got %q", final.State)
+	}
+
+	history, err := reader.ListHistory(ctx, inst.InstanceID, 10)
+	if err != nil {
+		t.Fatalf("ListHistory: %v", err)
+	}
+	if len(history) != 3 {
+		t.Fatalf("expected exactly 3 history rows (baseline + 2 serialized transitions), got %d: %+v", len(history), history)
 	}
 }

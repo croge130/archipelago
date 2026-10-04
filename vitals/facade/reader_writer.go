@@ -28,6 +28,12 @@ type Writer interface {
 	CreateInstance(ctx context.Context, i structure.Instance) error
 	UpsertReading(ctx context.Context, r structure.Reading) error
 	InsertHistory(ctx context.Context, h structure.HistoryEntry) error
+
+	// WriteReadingAtomic is WriteReading's real implementation — see
+	// its own doc comment for the concurrent-write race a separate
+	// read-then-decide-then-write here would reintroduce.
+	WriteReadingAtomic(ctx context.Context, reading structure.Reading, expectedStates []structure.State) (structure.Reading, error)
+
 	CreateGroup(ctx context.Context, g structure.Group) error
 	UpsertGroupMember(ctx context.Context, m structure.GroupMember) error
 	DeleteGroupMember(ctx context.Context, groupID uuid.UUID, memberKey string) error
