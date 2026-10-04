@@ -20,5 +20,6 @@ use (
 	./typedvalue
 	./vitals
 	./vitalsauth
+	./vitalsdefaults
 	./wire
 )
