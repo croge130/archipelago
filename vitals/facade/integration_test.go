@@ -5,6 +5,7 @@ package facade
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"sync"
@@ -13,6 +14,7 @@ import (
 
 	archidb "github.com/croge130/archipelago/db"
 	"github.com/croge130/archipelago/logging"
+	"github.com/croge130/archipelago/typedvalue"
 	"github.com/croge130/archipelago/vitals/storage/dbstore"
 	"github.com/croge130/archipelago/vitals/structure"
 	"github.com/google/uuid"
@@ -171,6 +173,61 @@ func TestWriteReadingUnknownInstanceDenied(t *testing.T) {
 
 	if _, err := WriteReading(ctx, reader, writer, structure.Reading{InstanceID: uuid.New(), State: structure.StateOK}); !errors.Is(err, ErrInstanceNotFound) {
 		t.Fatalf("expected ErrInstanceNotFound, got: %v", err)
+	}
+}
+
+// TestWriteReadingNormalizesValueAgainstDefinitionValueMetadata proves
+// the end-to-end wiring, not just evaluation.NormalizeAndValidateValue
+// in isolation: a Definition that declares ValueMetadata gets that
+// shape enforced on every WriteReading through this instance, and the
+// stored Value is the normalized canonical form, not the caller's raw
+// bytes.
+func TestWriteReadingNormalizesValueAgainstDefinitionValueMetadata(t *testing.T) {
+	reader, writer := setupTest(t)
+	ctx := context.Background()
+
+	vm := typedvalue.Count("item", "queue depth")
+	def, err := EnsureDefinition(ctx, reader, writer, structure.Definition{
+		DefinitionKey: "myapp.queue.depth", DefinitionVersion: 1, ValueMetadata: &vm,
+	})
+	if err != nil {
+		t.Fatalf("EnsureDefinition: %v", err)
+	}
+	inst := ensureTestInstance(t, ctx, reader, writer, def, "myapp", "core.services.queue.depth")
+
+	got, err := WriteReading(ctx, reader, writer, structure.Reading{
+		InstanceID: inst.InstanceID, State: structure.StateOK, Value: json.RawMessage(`"42"`),
+	})
+	if err != nil {
+		t.Fatalf("WriteReading with a value conforming to ValueMetadata: %v", err)
+	}
+	if string(got.Value) != "42" {
+		t.Fatalf("expected the stored Value to be normalized to 42, got %s", got.Value)
+	}
+}
+
+// TestWriteReadingRejectsValueNotConformingToValueMetadata is the
+// other half: once a Definition declares ValueMetadata, a Value that
+// doesn't fit it is rejected outright rather than stored as-is —
+// enforcement is mandatory whenever ValueMetadata is set, not a
+// separate opt-in.
+func TestWriteReadingRejectsValueNotConformingToValueMetadata(t *testing.T) {
+	reader, writer := setupTest(t)
+	ctx := context.Background()
+
+	vm := typedvalue.Count("item", "queue depth")
+	def, err := EnsureDefinition(ctx, reader, writer, structure.Definition{
+		DefinitionKey: "myapp.queue.depth.rejects", DefinitionVersion: 1, ValueMetadata: &vm,
+	})
+	if err != nil {
+		t.Fatalf("EnsureDefinition: %v", err)
+	}
+	inst := ensureTestInstance(t, ctx, reader, writer, def, "myapp", "core.services.queue.depth.rejects")
+
+	if _, err := WriteReading(ctx, reader, writer, structure.Reading{
+		InstanceID: inst.InstanceID, State: structure.StateOK, Value: json.RawMessage(`"not a number"`),
+	}); err == nil {
+		t.Fatal("expected WriteReading to reject a Value that doesn't conform to the Definition's ValueMetadata")
 	}
 }
 

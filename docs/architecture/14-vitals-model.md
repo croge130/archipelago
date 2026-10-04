@@ -422,3 +422,49 @@ Closed the same way — the check and the insert run inside one
 transaction, serialized this time by a `pg_advisory_xact_lock` (global,
 not per-group, since membership changes are rare administrative
 operations, not a hot path worth finer-grained locking for).
+
+## Runtime validation of Reading.Value against Definition.ValueMetadata
+
+`Definition.ValueMetadata` is optional — nil means this vital carries
+no typed value, and a caller free to put whatever JSON it wants into
+`Reading.Value`, or to use the fully opaque `AppValueMetadata` instead
+for a meaning `typedvalue` doesn't model at all. That's already the
+answer to "isn't `typedvalue` overkill for a generic, app-defined
+vital": the generic case is the cheap path that never touches
+`typedvalue`.
+
+The remaining question is what happens once a `Definition` *does* set
+`ValueMetadata`. Enforcement there is mandatory, not a second opt-in
+setting layered on top of the first: declaring a typed shape at all is
+already the declaration of intent for what this vital's value is, the
+same reasoning that already lets Policy's own `typeconstraints.Set.Check`
+run unconditionally in `SetPolicyInstance` whenever a `PolicyDefinition`
+carries constraints, with no separate "should I enforce this" flag.
+Mirroring that instead of inventing a new per-vital setting, an SDK-
+level runtime toggle, or a Policy pointer for enforcement itself avoids
+a second knob that could silently contradict the first (a typed
+`ValueMetadata` that isn't actually enforced because some other
+setting turned enforcement off somewhere else).
+
+Mechanically: `WriteReading` (`vitals/facade/reading.go`) already looks
+up the `Instance`'s `Definition` to resolve `expectedStates`; it uses
+that same lookup to call `evaluation.NormalizeAndValidateValue(def,
+reading.Value)` before delegating to `Writer.WriteReadingAtomic`.
+`ValueMetadata == nil`, or an empty `Value`, both pass through
+unchanged — a `Reading` with no `Value` at all is not itself a
+violation of a `Definition` that declares one; that's a presence rule,
+a different question this function doesn't answer. When both are
+present, the stored `Value` becomes `typedvalue.NormalizeValue`'s
+canonical form (coerced/trimmed, re-marshaled), not the caller's raw
+bytes — the same "store the normalized value, not the raw input"
+behavior `SetPolicyInstance` already has, so any consumer that already
+knows a `Definition`'s `ValueMetadata` shape can trust `Value`'s stored
+form without re-normalizing it itself.
+
+This lives in `vitals/evaluation`, not `storage/dbstore` or inline in
+the writer: it's pure decision logic over `structure.Definition`/
+`typedvalue.Definition`, no database involved, the same split
+`QualityWarnings`/`IsNotableTransition` already follow in that
+package. `Writer.WriteReadingAtomic`'s own signature is untouched —
+`facade.WriteReading` already had the `Definition` in hand for
+`expectedStates`, so no new interface surface was needed to add this.

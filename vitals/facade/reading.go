@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/croge130/archipelago/vitals/evaluation"
 	"github.com/croge130/archipelago/vitals/structure"
 )
 
@@ -31,6 +32,11 @@ var ErrInstanceNotFound = errors.New("facade: vitals: instance not found")
 // UpdatedAt is always set to now here, overriding whatever the caller
 // passed; ObservedAt stays the caller's own "when I actually observed
 // this" field, which can legitimately differ.
+//
+// When def.ValueMetadata is set, reading.Value is validated and
+// normalized against it before the write — enforcement is mandatory
+// whenever a Definition declares a value shape at all, not a separate
+// opt-in; see evaluation.NormalizeAndValidateValue's own doc comment.
 func WriteReading(ctx context.Context, reader Reader, writer Writer, reading structure.Reading) (structure.Reading, error) {
 	instance, found, err := reader.GetInstance(ctx, reading.InstanceID)
 	if err != nil {
@@ -46,6 +52,12 @@ func WriteReading(ctx context.Context, reader Reader, writer Writer, reading str
 	if !found {
 		return structure.Reading{}, fmt.Errorf("facade: write reading: instance %s references a missing definition %s", instance.InstanceID, instance.DefinitionID)
 	}
+
+	normalizedValue, err := evaluation.NormalizeAndValidateValue(def, reading.Value)
+	if err != nil {
+		return structure.Reading{}, fmt.Errorf("facade: write reading: %w", err)
+	}
+	reading.Value = normalizedValue
 
 	expectedStates := structure.ExpectedStatesOrDefault(instance, def)
 	reading.UpdatedAt = time.Now().Truncate(time.Microsecond)
