@@ -88,8 +88,8 @@ type Definition struct {
     Description           string
     ValueMetadata         *typedvalue.Definition // nil if this vital carries no typed value
     AppValueMetadata      json.RawMessage         // opaque, never authorized on
-    AllowedStates         []string                // nil = no restriction beyond the closed State enum
-    DefaultExpectedStates []string
+    AllowedStates         []State                 // nil = no restriction beyond the closed State enum
+    DefaultExpectedStates []State
     DefaultImportance     Importance
     DefaultTTL            *time.Duration
     DefaultDisplayHints   json.RawMessage
@@ -156,7 +156,7 @@ type Instance struct {
     DisplayName     string
     Description     string
     CategoryPath    []string // organizational only, not identity — max depth 8, max segment 64 runes
-    ExpectedStates  []string
+    ExpectedStates  []State
     Importance      Importance
     ReferenceRanges json.RawMessage
     DisplayHints    json.RawMessage
@@ -340,14 +340,14 @@ vitals.group.manage
 Context-scoped exactly like `aliasauth` already scopes Alias's own
 permissions — `RequireContextPermission(ctx, store, principalID,
 permissionKey, instance.ScopeType, instance.ScopeID)` for instance/
-reading operations; a definition-namespace-style context (mirroring
-`vitals-definition-namespace:<prefix>` → really just the definition
-key's own reserved-namespace check, the same mechanism
-`RegisterPermission`'s `AllowReservedNamespace` already uses) for
-definition management, so Vitals needs no new context-scoping idea at
-all. This resolver is `vitalsauth`, the second Layer 2 integration, over
-Vitals + Gatehouse-core only — never importing Policy, same one-pair-
-per-package discipline as every other integration in this design.
+reading operations. Definition management is the one exception: a
+`Definition` carries no scope field (ownership of a `DefinitionKey` is
+the reserved-namespace convention above), so there's no scope pair to
+check against, and `vitals.definition.manage` is a plain global
+`RequirePermission`. This is `vitalsauth`, the second Layer 2
+integration, over Vitals + Gatehouse-core only — never importing
+Policy, same one-pair-per-package discipline as every other
+integration in this design.
 
 ## What's deliberately out of scope (this pass)
 
@@ -433,8 +433,8 @@ resolves consistently rather than corrupting state. Whether a given
 imposes (typically: each instance owns and writes its own `Instance`,
 and a coordinator computes any fleet-wide rollup as its own write
 against a separate, coordinator-owned `Instance` — never multiple
-peers writing toward one shared row). `vitalsauth` (not yet built) is
-where that policy would actually get enforced, via whatever permission
+peers writing toward one shared row). `vitalsauth` is where that
+policy actually gets enforced, via whatever permission
 scoping a caller sets up for `vitals.write` against a given Instance's
 `(ScopeType, ScopeID)`; Vitals' own base layer has no opinion on it.
 

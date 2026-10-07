@@ -9,13 +9,15 @@ existing infrastructure, not new plumbing." Checking that claim
 against the actual code first — the same discipline that caught
 Endpoint self-advertisement's opposite mistake (a dependency claimed
 that wasn't real) — turned up the reverse problem here: the
-infrastructure it claims already exists, doesn't.
+infrastructure it claims already exists, doesn't. (Both gaps below are
+what this pass found *before* building; sections further down describe
+what was then built to close them.)
 
-- `wire.Message` (`Type`, `Payload`, `ID`, `Kind`, `Channel`) has no
+- `wire.Message` (`Type`, `Payload`, `ID`, `Kind`, `Channel`) had no
   trace-context field. `06-logging-and-observability.md`'s "Transit
   carries correlation for free" section describes one being added,
   but it never was.
-- `logging` is pure write-only: `NewTextLogger`/`NewJSONLogger` wrap an
+- `logging` was pure write-only: `NewTextLogger`/`NewJSONLogger` wrap an
   `io.Writer` sink via `slog` handlers, tagging every record with
   trace/span/resource attributes, and that's the whole surface. There
   is no way to capture, buffer, or later re-export what's already been

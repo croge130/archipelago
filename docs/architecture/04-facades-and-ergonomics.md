@@ -47,9 +47,14 @@ Gatehouse-core is optional at zero cost today simply by not importing
 it — it's its own module. The harder case is wanting the *rest* of the
 SDK (Transit, certstore, endpoint registration) without being locked
 into Gatehouse-core's specific evaluator. Nothing forces that question
-yet, because nothing outside Gatehouse-core calls `Evaluate` — but
-three constraints are worth holding onto for whenever something does,
-so the eventual design doesn't have to be re-derived from scratch:
+yet. Integrations that authorize (`peerauth`, `vitalsauth`, `sso`) do
+call `evaluation.RequirePermission` directly today, but they're
+*Gatehouse-core integrations by definition* — they already import it,
+so there's no lock-in to avoid. The question only bites for something
+that wants an authorization check **without** importing Gatehouse-core
+at all, and nothing does yet. Three constraints are worth holding onto
+for whenever something does, so the eventual design doesn't have to be
+re-derived from scratch:
 
 1. **The consumer declares its own thin interface at its own
    boundary** — the same rule already applied twice (`evaluation.Store`,
@@ -95,7 +100,12 @@ places that had no reason to stay in sync. The agent's own endpoint
 registry (`lighthouse.docs.endpoints`) existed the whole time; the SDK's
 allowlist just wasn't derived from it.
 
-Archipelago does not repeat this. From the start:
+Archipelago does not repeat this. **Built:** the registration and the
+live query below exist in Gatehouse-core
+([`15-endpoint-advertisement-model.md`](15-endpoint-advertisement-model.md)).
+**Not built:** the "advertisement endpoint" in the diagram is, today, an
+in-process Go function — nothing exposes it as a Transit-callable
+endpoint, pending a Router. From the start:
 
 - **Endpoints register themselves, once, in one place** — including
   SDK-user-defined custom endpoints, not just built-in ones. Registration

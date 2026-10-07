@@ -160,7 +160,7 @@ applied to CRDTs and consensus, just at a smaller scale.
 ## What the `registry` integration package actually provides
 
 ```go
-func RegisterFromSession(ctx context.Context, gatehouseStore Store, session transit.Session, group string, metadata json.RawMessage) (structure.Instance, error)
+func RegisterFromSession(ctx context.Context, reader gatehouseFacade.Reader, writer gatehouseFacade.Writer, session transit.Session, group string, metadata json.RawMessage) (structure.Instance, error)
 ```
 
 Resolves `session`'s peer identity to a principal via
@@ -168,12 +168,18 @@ Resolves `session`'s peer identity to a principal via
 itself uses), then registers an `Instance` for that principal — an
 instance's identity in the registry is only ever as trustworthy as the
 mTLS-verified connection that registered it, never a caller-asserted
-`PrincipalID` with no transport-level backing. `Heartbeat`, `Deregister`,
-`ListPeers`, `AcquireLease`, `RenewLease`, and `ReleaseLease` are thinner
-wrappers directly over Gatehouse-core's own facade — identity resolution
-is the one thing this integration genuinely adds; lock/discovery
-mechanics belong to Gatehouse-core's own storage once an `Instance`'s
-identity is established.
+`PrincipalID` with no transport-level backing.
+
+That one function is the whole package. `Heartbeat`, `Deregister`,
+`ListPeers`, `AcquireOrRenewLease`, and `ReleaseLease` need neither
+Transit nor `peerauth`, so they're called directly as
+`gatehouse-core/facade` functions and are **not** re-wrapped here —
+`registry/doc.go` makes this an explicit decision, not an omission:
+pass-through wrappers with no behavior of their own would be
+indirection for its own sake. (An earlier draft of this doc described
+those as `registry` wrappers, including separate `AcquireLease` and
+`RenewLease`; there is one `AcquireOrRenewLease`, since the single
+atomic statement above already covers both.)
 
 ```mermaid
 flowchart TB

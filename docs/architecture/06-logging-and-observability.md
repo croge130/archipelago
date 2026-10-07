@@ -38,6 +38,17 @@ code, left undeclared.
   general sink is configured. The distinction is about what's being
   recorded and how durably, not about a different logging system.
 
+**Status, honestly:** the `logging` module itself is built (levels,
+`Resource`, trace/span IDs, span links, the capture buffer), but
+adoption is not. Of the bases and integrations, only `vitals` (a
+`SpanContext` field on `Reading`) and `wire`/`traceagg` import it today;
+`gatehouse-core`'s evaluator doesn't log at all yet, and the audit
+sink described above doesn't exist. Both are confirmed, deferred design
+— the audit record's field shape is in
+[`09-gatehouse-core-model.md`](09-gatehouse-core-model.md)'s "Audit
+shape" section, itself "not yet pinned to exact field names" — not
+abandoned ideas.
+
 ## Standard terms, not invented ones
 
 Lighthouse's Logbook used its own vocabulary for connecting related
@@ -72,7 +83,7 @@ produced it*, attached once per process rather than per event:
 | `service.name` | logical service/app identity | already "app" |
 | `service.instance.id` | one running copy of that service | already "instance" — matches the grouping concept in [`03-multi-instance-and-suites.md`](03-multi-instance-and-suites.md) |
 | `process.pid` | the OS process backing the instance right now | new — distinguishes "same instance, but this is run #3 after a restart" |
-| `host.id` / `host.name` | the machine the process ran on | new — infra-level correlation across co-located instances |
+| `host.name` | the machine the process ran on | new — infra-level correlation across co-located instances. Built as `host.name` only, filled from `os.Hostname()`; a stable `host.id` (e.g. `/etc/machine-id`) is left for a caller to set rather than guessed at |
 
 **Shard is deliberately not on this list.** Sharding is a data-partitioning
 concept (which subset of data this instance is responsible for), not an
