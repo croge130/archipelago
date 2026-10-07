@@ -225,6 +225,7 @@ differently; see
 | `14-vitals-model.md` | Current-condition records (Definition/Instance/Reading/History/Group), adapted from Lighthouse's own Vitals; concurrency and ValueMetadata validation |
 | `15-endpoint-advertisement-model.md` | Endpoints register themselves once; advertisement is a live, permission-filtered query over the same data |
 | `16-trace-log-aggregation-model.md` | Trace context riding on `wire.Message`, an opt-in capture buffer in `logging`, and `traceagg`'s cross-instance collector |
+| `17-sdk-model.md` | The `sdk` module as a composition root (open, migrate, seed, expose stores) rather than a second API; modes; what stays in-process until a Router exists |
 
 Config format split, settled and not up for relitigating without a new
 concrete reason: **XML** for document-shaped content (docs, dashboards),

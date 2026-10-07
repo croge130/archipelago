@@ -120,6 +120,8 @@ archipelago/
                                 # modules. See "Why the SDK module doesn't
                                 # defeat 'import only what you need'" below
                                 # — still the intended design, just unbuilt.
+                                # What it actually contains is designed in
+                                # 17-sdk-model.md.
 
   cmd/
     archipelago/                 # not yet built — the CLI; would depend on sdk/
