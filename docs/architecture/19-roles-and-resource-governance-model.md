@@ -37,7 +37,8 @@ to.
 
 - **Role definition** — a key, a description, its duties, the permissions
   those duties need, the Policy definitions that configure it, whether it
-  is exclusive, and a *default budget*. Core roles live under a reserved
+  is exclusive (**no, unless it says so** — see below), and a *default
+  budget*. Core roles live under a reserved
   namespace owned by the base that defines them; app-defined roles are
   anything else, exactly the core/app split `18` already makes, using the
   same reserved-namespace map.
@@ -121,9 +122,20 @@ multiplexed by a process-wide scheduler. So the governor's limits are
   duty's definition, not an accident of an unbounded channel.
 - **Rate** — at most N starts per interval.
 - **Per-run timeout** — via context deadline.
-- **Cooperative accounting** for memory and bytes — a duty that processes
-  data reports what it holds, and the governor refuses to start more once
-  a limit is reached. It cannot reclaim memory a duty already allocated.
+
+**Budgets are tiers first, numbers second.** Rather than asking a node to
+reason about bytes, the common vocabulary is a coarse tier — `low`,
+`medium`, `high` — and the node's config says `budget = low`. The role
+author, who knows what its own work costs, declares what each tier means
+for *that role* (for example a batch size, a concurrency, a queue depth
+and a rate); the node ceiling then clamps those numbers as usual. Explicit
+numbers remain available for the dimensions the governor can really
+enforce (concurrency, queue depth, rate, timeout) as an escape hatch.
+
+This is also why memory is **not** accounted. A tier is a hint a duty can
+honor (a smaller batch at `low`), not an enforced limit, and nothing in
+the governor tries to measure what a duty holds. Hard memory protection
+remains the operating system's job.
 
 Real CPU and memory isolation belongs to the operating system (cgroups,
 container limits). The governor is compatible with that and does not
@@ -159,8 +171,14 @@ records `actor_principal`, `requested_by_principal` and
 
 ## Exclusive roles use leases
 
-A role that must have exactly one holder per group (a leader, the cluster
-scheduler) is a [`13`](13-registry-and-leases-model.md) lease:
+**Roles are not unique unless they say so, and designs should work around
+a role type having several holders wherever possible.** Most roles — an
+executor, a retention sweeper — are safe, and often better, run by many
+nodes at once. Exclusivity is an explicit, opt-in property of a role
+definition, reserved for the cases that genuinely need one holder.
+
+A role that must have exactly one holder per group (a leader) is a
+[`13`](13-registry-and-leases-model.md) lease:
 `(Group, Name)` held by one `Instance`. Its duties run only while the
 lease is held, and losing it cancels them through their context.
 
@@ -168,16 +186,18 @@ lease is held, and losing it cancels them through their context.
 the same reasoning means it is not a fencing token either. That matters
 here: after expiry, a slow previous holder can
 briefly overlap with a new one. So **a duty of an exclusive role must be
-idempotent**, or carry its own fencing, rather than assuming the lease
-alone guarantees single execution.
+idempotent**, rather than assuming the lease alone guarantees single
+execution. Fencing tokens are not designed in; if a duty cannot be made
+idempotent it is probably the wrong thing to make exclusive.
 
 ## The local scheduler
 
 The first revision of this doc treated scheduling as a separate,
 deferred "Beacon-equivalent" system. That undersold it: a role that runs
 duties automatically *needs* something that says when each is due, so a
-local scheduler is part of this design, and the larger durable job
-machinery is what remains out of scope (see the end of this section).
+local scheduler is part of this design. The durable side — queues,
+retries, work handed across boundaries — is the job system, also in
+scope, described further below.
 
 **Triggers.**
 
@@ -207,11 +227,10 @@ the domain's Policy may override it. A role can also declare a *floor*
 `typeconstraints` bound, so a policy value cannot ask for a schedule the
 role was never designed to withstand. Clamps are reported, as for budgets.
 
-**What the scheduler is not.** It is in-process. It has no durable queue,
-no cross-node deduplication, and no workflow (dependencies, fan-out,
-priorities). A schedule that must survive restarts with its history
-intact, or tasks chained into a pipeline, is the larger job system that
-remains deferred.
+**What the scheduler is not.** It is in-process. It has no durable
+queue, no cross-node deduplication, and no workflow. Anything that must
+survive a restart, be handed across a boundary, or be retried belongs to
+the job system below, which the scheduler feeds rather than replaces.
 
 ## Three kinds of scheduled work
 
@@ -286,6 +305,59 @@ Design points that follow from earlier docs:
   So local duties, then the director's *sending* path, can come first;
   the executor's receiving side lands with the Router.
 
+## The job system
+
+**In scope.** The purpose is to let an application defer work across
+boundaries — hand it to another node, or to later — and have it survive
+restarts and be retried. (An earlier revision of this doc listed it as out
+of scope; that was wrong, and is corrected here.)
+
+**The one hard constraint: no arbitrary code execution.** A node performs
+only task kinds it has *registered a handler for*. A job carries **data**:
+a task kind and parameters validated against that kind's `typedvalue`
+schema. It never carries code, a script, or a command line. A job naming a
+kind the node has no handler for is rejected, not interpreted. Registering
+a handler *is* adopting the executor role for that kind, which is also what
+makes "executor of kind K" a capability worth advertising (`18`).
+
+**Direction, not yet a design** (it will get its own doc):
+
+1. **A new base, `jobs`**, with the project's usual structure / evaluation /
+   storage / facade layers and a Postgres store. A job records its task
+   kind, validated parameters, a schedule (one-shot, or recurring), a
+   deadline, a retry policy, an idempotency key, a target selector (any
+   executor of the kind, by label, or a named node), its state, its
+   attempts, who requested it and under what authority source, and trace
+   context. Principals are opaque UUIDs here, as in Vitals, so the base
+   needs no Gatehouse-core.
+2. **Claiming is atomic with an expiry**, the same single-statement pattern
+   `AcquireOrRenewLease` already uses: a claimed job whose claim lapses
+   returns to pending with its attempt count raised, and after the retry
+   policy's maximum it becomes a terminal failure that is reported. This is
+   what makes delivery at-least-once without a separate retry loop.
+3. **Executors with store access claim directly; nodes without it are
+   pushed to.** A node with store access can claim on another's behalf and
+   push the task over Transit. That unifies the "director" above with
+   "a node that can reach the store".
+4. **Deferring across a boundary means submitting through a node that has
+   the store.** For a node with no direct database access this is the
+   remote-intermediary `Store` implementation `02` already names as a later
+   implementation of the same interface; it needs the Router.
+5. **A durable recurring schedule is a recurring job definition**, so the
+   scheduler's catch-up record ("last run") is just the last instance that
+   definition produced. This is why the catch-up question does not need its
+   own table.
+6. **Authority at submission:** who may submit a job of kind K is a
+   permission per kind, checked by an integration (`jobs` + Gatehouse-core),
+   the same shape as `vitalsauth`.
+
+**A side finding that bears on this.** `13`'s `AcquireOrRenewLease` stamps
+`acquired_at` and `expires_at` from the *calling* instance's clock, and the
+SQL compares them against other callers' stamps — so two instances with
+skewed clocks can disagree about whether a lease expired. A job store
+should use the database's own clock for claim and expiry times instead.
+The lease code is worth the same fix; it is not part of this doc's scope.
+
 ## Likely shape (not decided)
 
 Following the project's module-per-dependency-unit rule:
@@ -295,45 +367,67 @@ Following the project's module-per-dependency-unit rule:
 - **`scheduler`** — a zero-dependency base too: triggers, per-duty overlap
   and catch-up policy, submitting due work to a governor. No storage unless
   a catch-up record is wired in by an integration.
+- **`jobs`** — the durable job base described above; no dependency on any
+  other base.
 - **`roles`** — role definitions, adoption, and the runner, depending on
   `governor`, `scheduler` and `logging` only.
 - Integrations, each importing exactly the two bases it combines:
   `roles` + Policy (resolve budgets, schedules, config), `roles` +
   Gatehouse-core (principal and permission checks), `roles` +
   registry/leases (exclusivity), `roles` + Vitals (report duty health and
-  clamps), and `roles` + Transit (executor receiving and director
-  sending, once a Router exists).
+  clamps), `roles` + `jobs` (executors claiming work), `jobs` +
+  Gatehouse-core (submission permission per kind), and `roles` + Transit
+  (executor receiving and director sending, once a Router exists).
 - **`sdk`**: `Config` gains a *shared* `Governor` handed to every `App` on
   the node, and a list of adopted roles per `App`.
 
-## Open questions
+## Decisions so far
 
-1. **Fencing for exclusive roles** — idempotency required (above), or
-   fencing tokens designed in.
-2. **The yield signal** — what the app calls, and whether roles pause or
-   shed.
-3. **Policy-invited adoption** — needs the label type from `18`; the
-   consent step is not designed.
-4. **Defaults vs. refusing to start** — recommended: no silent default,
-   adoption acknowledges one. Confirm.
-5. **Memory accounting** — cooperative only; whether that is worth
-   building before a duty actually needs it.
-6. **Where adoption config lives** and how a node enumerates its roles
-   across domains, alongside the open "domain identity's form" question in
-   `18`.
-7. **Core roles' first consumers** — candidates: `registry`'s heartbeat
-   and lease renewal (`13`), the deferred retention sweep in `14`, and
-   the task executor/director pair.
-8. **Catch-up record.** Where "last run" lives for nodes that have
-   storage, without making it a requirement for nodes that don't.
-9. **Task identity and dedup window.** How long an executor remembers a
-   `TaskID`, and what happens to a duplicate that arrives after it
-   forgot.
-10. **Result delivery.** A correlated result event versus a long-lived
-    channel for tasks that stream progress; `11`'s delivery classes allow
-    either.
-11. **Clock skew** between director and executor when a task carries a
-    deadline: absolute time versus a duration relative to receipt.
-12. **A durable job system** — schedules and queues that survive restarts,
-    workflow, priorities — remains deliberately out of scope for this
-    design and is the natural next layer if a real consumer needs it.
+1. **Roles are non-unique by default.** Exclusivity is explicit and opt-in,
+   and designs should tolerate several holders wherever possible. Duties
+   of an exclusive role must be idempotent; fencing tokens are not
+   designed in.
+2. **Budgets are tiers** (`low`/`medium`/`high`) that the role author
+   defines in concrete terms, with explicit numbers only for what the
+   governor can enforce. No memory accounting. *(Proposed in review;
+   recorded here as the working position.)*
+3. **First consumers of the role runtime:** `registry`'s heartbeat and
+   lease renewal first (a local duty, no Transit, a real existing gap,
+   testable against real Postgres); the `vitals` history retention sweep
+   second; executor and director once the job system and Router exist.
+   Build order: governor, scheduler, role runner, then the registry
+   membership role.
+4. **Catch-up record:** a small interface in `scheduler` (get and put the
+   last run per role and duty), in-memory by default so nodes with no
+   storage get skip semantics; the durable implementation comes with the
+   job system rather than a separate table.
+5. **Deadlines are relative durations from receipt**, not absolute
+   timestamps. The executor computes its own absolute deadline from its
+   own clock. Calendar schedules are evaluated only on the node that owns
+   them and are never shipped as absolute times to others. Job timestamps
+   use the database's clock.
+6. **The durable job system is in scope**, under the no-arbitrary-code
+   constraint above.
+
+## Still open
+
+1. **The yield signal** — what the app calls to say it is busy, and
+   whether roles pause or shed. Recommended: a small pressure level the
+   app sets, which lowers *admission* only and never kills a running duty
+   unless that duty opted into cancellation.
+2. **Policy-invited adoption** — a domain asking nodes to adopt a role.
+   Needs the label type from `18`; recommended shape is "ignored unless the
+   node holds a standing allow-list".
+3. **Defaults versus refusing to start** — recommended: no silent default;
+   a role with no stated budget fails *that role only*, loudly.
+4. **Where adoption config lives and how a node enumerates roles across
+   domains** — recommended: code-defined to start, as structs that could
+   later be loaded from a file; observers learn a node's roles by
+   advertisement, not by reading its config.
+5. **Task identity and the dedup window** — recommended: the job ID plus an
+   attempt number, with the executor remembering recent IDs for roughly
+   the task's deadline plus a margin; the job store is the durable memory.
+6. **Result delivery** — recommended: a correlated result event by default;
+   a channel only for task kinds that declare they stream progress.
+7. **The job system's own design** — its states, claim and retry rules,
+   target selection and authority, to be written as its own doc.
