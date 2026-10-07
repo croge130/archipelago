@@ -109,6 +109,10 @@ versioned with the protocol. An unknown key in a core namespace from a
 newer peer is ignored, not an error; an unknown app-defined key is just
 data.
 
+A node *adopting* a role, and the resource bounds that keep adopted
+roles from overwhelming it, are designed in
+[`19-roles-and-resource-governance-model.md`](19-roles-and-resource-governance-model.md).
+
 *Open:* labels have no type today — only `Instance.Group` and opaque
 `Metadata`. Selection like "peers with `env=prod`" needs a queryable shape,
 so a small namespaced key/value type is likely warranted; not designed.
