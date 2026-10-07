@@ -12,6 +12,8 @@ use (
 	./peerauth
 	./policy
 	./registry
+	./sdk
+	./sdkdb
 	./sessions
 	./sso
 	./traceagg

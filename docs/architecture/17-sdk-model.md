@@ -91,7 +91,7 @@ type Stores struct {
     // ... Alias, Certs, Vitals — each side of each pair independently nil-able
 }
 
-func New(stores Stores, cfg Config) (*App, error)        // validates, never touches a store
+func New(stores Stores, modes Modes, cfg Config) (*App, error) // validates, never touches a store
 func (a *App) Seed(ctx context.Context) (SeedReport, error) // the only step that writes
 
 // DB-backed provider: the one storage implementation that exists today.
@@ -129,7 +129,7 @@ flowchart TB
         REMOTE["Remote-intermediary stores<br/>(not yet built — same interfaces)"]
     end
     STORES["Stores — per base: Reader and Writer,<br/>each independently optional"]
-    NEW["sdk.New(stores, cfg)<br/>validate modes against what's present — no I/O"]
+    NEW["sdk.New(stores, modes, cfg)<br/>validate modes against what's present — no I/O"]
     ERR["Error naming the missing store<br/>(mode enabled, store absent)"]
     APP["*App — interface-typed store fields"]
     SEED["app.Seed(ctx) — optional, per-mode,<br/>skipped where Writer is nil → SeedReport"]
@@ -184,19 +184,51 @@ coordinator behavior as "the same SDK with a few more modes turned on."
 Concretely, a mode gates (a) which `Stores` entries `New` requires, (b)
 which steps `Seed` attempts, and — only for `OpenDB` — (c) which
 migrations run. It's never a reason for the core to touch a database
-itself:
+itself.
 
-| Mode | What turning it on does |
-|---|---|
-| (always) | gatehouse-core stores, permission registry |
-| Policy | policy stores; required by Vitals' default-group resolution |
-| Alias | alias stores + `aliasauth.RegisterPermissions` |
-| Vitals | vitals stores, `vitalsauth.RegisterPermissions`, `SeedBuiltinDefinitions`; with Policy also on, `EnsurePolicyDefinition` |
-| Certs | certstore stores; required for mTLS identity and SSO |
-| SSO provider | needs a ticket-signing `certstoreEvaluation.Signer` supplied in `Config` — the SDK never generates or stores the key itself, matching `12-sso-tickets-model.md`'s "never the mTLS key" rule |
+Modes name **bases**, and **integrations switch on when both bases they
+combine are enabled** — there's no separate flag for them. That keeps a
+scoped node expressible: one holding Vitals but not Gatehouse-core
+enables just `Vitals` and gets the narrower set of seeding steps.
 
-Registry/leases need no mode of their own: `Instance` and `Lease` are
-gatehouse-core records, always part of its stores.
+| Enabled | Requires | Seeding steps it adds |
+|---|---|---|
+| `Gatehouse` | `Stores.Gatehouse.Reader` | — (registry/leases need no mode of their own: `Instance`/`Lease` are Gatehouse-core records) |
+| `Policy` | `Stores.Policy.Reader` | — |
+| `Alias` | `Stores.Alias.Reader` | with `Gatehouse`: `aliasauth.RegisterPermissions` |
+| `Vitals` | `Stores.Vitals.Reader` | `SeedBuiltinDefinitions`; with `Gatehouse`: `vitalsauth.RegisterPermissions`; with `Policy`: `vitalsdefaults.EnsurePolicyDefinition` |
+| `Certs` | `Stores.Certs.Reader` | — |
+| `SSOProvider` | the `Gatehouse` and `Certs` modes, plus `Config.SSOSigner` — the SDK never generates or stores this key itself, matching `12-sso-tickets-model.md`'s "never the mTLS key" rule | — |
+
+Only the **Reader** is required by `New`; a Writer is only needed by the
+`Seed` steps that write, and their absence is a skip, not an error.
+
+## Status
+
+**Built:** the `sdk` module (`Stores`, `Modes`, `Config`, `New`,
+`App.Seed`, `SeedReport`) and the separate `sdkdb` module (`OpenDB`).
+`sdk`'s tests prove `New` performs no store I/O (the stores in those
+tests are nil-embedding fakes that panic on any call), that every
+missing store is reported together and wraps `ErrMissingStore`, that
+read-only seeding skips every step with a reason, and that a store
+error reaches the caller of `evaluation.RequirePermission` instead of
+becoming a denial. `sdkdb`'s tests run against real Postgres: a full app
+seeded twice in a row with one real cross-module flow
+(`EnsurePrincipal` → grant → `vitalsauth.WriteReading`), a read-only app
+over data a writer node seeded, and a scoped Vitals-only app.
+
+**A correction to the intent above, found while building:** the goal was
+that `sdk` never depend on `db` or pgx. The first half holds —
+Archipelago's own `db` module is not in `sdk`'s dependency graph, and
+nothing in `sdk` opens a connection. The second does not: pgx *does*
+appear in the build graph, transitively, because `certstore/evaluation`
+imports smallstep's CA library (`smallstep/certificates/authority`),
+which pulls in `smallstep/nosql/postgresql`. That is certstore's own
+dependency, present for any certstore user, not something `sdk` adds.
+It affects binary size, not behavior — nothing connects to a database
+unless a caller supplies stores that do. Removing it would mean
+splitting certstore's `facade` types away from its CA-backed
+`evaluation` package, which isn't worth doing for this alone.
 
 ## What stays in-process until a Router exists
 
@@ -238,24 +270,18 @@ own distinction between "not yet" and "never":
   into `peerauth`'s caller; once `sdk` exists it is the natural place
   for that wiring, but the design for it isn't done.
 
-## Build order for the module
+## Build order for the module (all built; see Status)
 
 1. `sdk/` module scaffold + `Stores`/`Config`/`Modes`/`New`: mode-vs-store
-   validation, no I/O. No `db` import in this layer — enforce that with
-   the module's own `go.mod` (the DB-backed provider lives in a separate
-   package, or a separate module, so a node that never touches it never
-   `require`s `db` or pgx).
-2. `Seed` + `SeedReport`: each mode's step independent, skipped (and
-   reported) where its `Writer` is nil.
-3. `OpenDB` — the Postgres provider.
-4. An integration test against real Postgres covering the access shapes,
-   not just the happy path: a full `App` built twice in a row (seeding
-   idempotent end to end) running one real cross-module flow — register a
-   permission, `EnsurePrincipal`, grant, then `vitalsauth.WriteReading`;
-   a read-only `App` (all `Writer`s nil) over the same data, proving
-   reads work and `Seed` reports every step skipped; a scoped `App`
-   with one base absent, proving `New` rejects a mode that needs it and
-   accepts one that doesn't; and a store wrapper that returns an error
-   for one call, proving the error reaches the caller instead of
-   becoming a denial. The SDK's tests exercise composition and the
-   no-direct-DB seams, not each base's own behavior again.
+   validation, no I/O, no `archipelago/db` dependency.
+2. `Seed` + `SeedReport`: each step independent, skipped (and reported)
+   where its Writer is nil.
+3. `sdkdb`'s `OpenDB` — the Postgres provider, its own module so `sdk`
+   never requires `db`.
+4. Tests across the access shapes, not just the happy path: full,
+   read-only, scoped, and a store that errors.
+
+Not covered by a test yet: a *conditional* store (reachable at some
+moments and not others) beyond the single-call error case, because no
+such store implementation exists to test against — the same "not yet"
+as the remote-intermediary stores themselves.

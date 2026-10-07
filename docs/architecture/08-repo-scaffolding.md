@@ -114,14 +114,15 @@ archipelago/
                                  # directly — see 16-trace-log-aggregation-
                                  # model.md for why)
 
-  sdk/                         # not yet built — the composed, ergonomic
-                                # surface most apps would import; depends
-                                # on every base module plus the integration
-                                # modules. See "Why the SDK module doesn't
-                                # defeat 'import only what you need'" below
-                                # — still the intended design, just unbuilt.
-                                # What it actually contains is designed in
-                                # 17-sdk-model.md.
+  sdk/                         # built — storage-agnostic composition root
+                                # (Stores/Modes/New/Seed); no dependency on
+                                # the db module. See 17-sdk-model.md. Still
+                                # the entry point most apps would import,
+                                # per "Why the SDK module doesn't defeat
+                                # 'import only what you need'" below.
+  sdkdb/                       # built — OpenDB, the DB-backed provider of
+                                # sdk.Stores; separate from sdk so sdk
+                                # never requires db
 
   cmd/
     archipelago/                 # not yet built — the CLI; would depend on sdk/
@@ -177,17 +178,20 @@ integrations — `registry` depends on `peerauth`) it actually needs.
 
 ## Why the SDK module doesn't defeat "import only what you need"
 
-The `sdk` module, when it's built, depends on every base and every
-integration — that's the point of it: it's the "I want the ergonomic,
-composed experience" entry point, not the minimal-footprint one. An
+The `sdk` module depends on the bases and integrations it composes —
+that's the point of it: it's the "I want the ergonomic, composed
+experience" entry point, not the minimal-footprint one. (Today that's
+gatehouse-core, policy, alias, certstore, vitals and the three
+integrations that seed them; transit-facing integrations aren't wired in
+until a Router exists — see `17-sdk-model.md`.) An
 app that genuinely wants only raw `transit`, or only `alias` with no
 authority model at all, imports that base module directly and never
 touches `sdk`. Both are the same underlying code, offered at two
 different levels of composition — nothing about one being convenient
 requires the other to stop being minimal. Nothing in the module-per-
-integration correction above changes this design; `sdk` simply isn't
-built yet, and every integration module above is already independently
-importable exactly the way this section always intended.
+integration correction above changes this design; `sdk` is now built, and
+every integration module above remains independently importable exactly
+the way this section always intended.
 
 ## What's decided here vs. still open
 
@@ -200,8 +204,8 @@ the exact internal decomposition of any base's `evaluation/` or
 `storage/` package (e.g. whether `gatehouse-core/evaluation` itself
 splits into principal-evaluation and grant-evaluation sub-packages is a
 call for when that split is actually needed, not something to pre-guess
-from a directory tree); and the `sdk`/`cmd/archipelago` layer, named
-above as intended but not yet built.
+from a directory tree); and the `cmd/archipelago` CLI layer, named
+above as intended but not yet built (`sdk` itself is built).
 
 ## Enforcement
 
