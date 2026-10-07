@@ -61,62 +61,108 @@ pair to be Postgres-backed.
 
 ## What `sdk` is
 
-Two layers, split exactly along the line above:
+### The access shapes it has to tolerate
+
+"Has a database" isn't one condition. The SDK must work for each of
+these, none of which can be a special case bolted on later:
+
+| Shape | What it means for the SDK |
+|---|---|
+| **Full read/write** | Today's only case. |
+| **Read-only** | `Reader` present, `Writer` absent for some or all bases. |
+| **Scoped** | Access to only *some* bases (a node that holds vitals + alias but not gatehouse-core), or to a subset of rows within one. |
+| **Conditional** | Access that comes and goes — unreachable at startup, credentials that expire, connect-on-demand. |
+| **None** | Everything goes through a remote implementation of the same interfaces. |
+
+Two consequences shape the design below. First, **every `Reader` and
+every `Writer`, for every base, is independently optional** — read-only
+isn't a global flag, it's "this base's `Writer` is nil." Second, the
+SDK core **performs no storage I/O in its constructor**, so a node whose
+access is conditional can still build an `App` and find out about
+availability the moment it actually uses a store.
+
+### Two layers, plus an explicit seeding step
 
 ```go
-// Storage-agnostic core: given stores, wire and seed.
+// Storage-agnostic core: wiring only, no I/O.
 type Stores struct {
     Gatehouse struct{ Reader gatehouseFacade.Reader; Writer gatehouseFacade.Writer }
     Policy    struct{ Reader policyFacade.Reader;     Writer policyFacade.Writer }
-    // ... Alias, Certs, Vitals — each optional, per Modes
+    // ... Alias, Certs, Vitals — each side of each pair independently nil-able
 }
 
-func New(ctx context.Context, stores Stores, cfg Config) (*App, error)
+func New(stores Stores, cfg Config) (*App, error)        // validates, never touches a store
+func (a *App) Seed(ctx context.Context) (SeedReport, error) // the only step that writes
 
 // DB-backed provider: the one storage implementation that exists today.
 func OpenDB(ctx context.Context, dbCfg db.Config, modes Modes) (Stores, *db.Pool, error)
 ```
 
-`New` is the real composition root: it validates that the stores a mode
-needs were supplied, runs the idempotent seeding steps (4 above), and
-returns an `App` whose exported fields are those stores — typed as the
-**interfaces**, never as `*PostgresReader`. `OpenDB` is a convenience
-that does steps 1 and 2 and hands back `Stores`; an app that wants the
-common single-node case calls `New(ctx, stores, cfg)` with its result. A
-node with a different storage arrangement skips `OpenDB` and supplies
-`Stores` from wherever its reads and writes actually go. Step 3 stays the
-caller's call, made against the exposed fields.
-
-**Read-only nodes.** Seeding is a *write*, and in the asymmetric topology
-only the designated writer should perform it. So `Config` carries an
-explicit `SkipSeeding` (or, equivalently, `New` treats a `Stores` with a
-nil `Writer` as read-only and seeds nothing). A read-only node still gets
-the full `App` for evaluation and reads; calling a write path on it fails
-at the missing `Writer`, loudly, rather than being silently absent. The
-SDK doesn't invent the policy for *which* node writes — that's the
-caller's topology decision, the same way `03` leaves it.
+- **`New` validates what each mode *requires*, up front, and names what's
+  missing.** Turning on the Vitals mode with a nil gatehouse `Reader` (so
+  `vitalsauth` has nothing to authorize against) is a construction-time
+  error listing the absent store, not a nil dereference three calls
+  later. This is the scoped-access case: a node that legitimately lacks
+  gatehouse-core simply doesn't enable modes that need it.
+- **`Seed` is separate from `New` on purpose.** Seeding is the one thing
+  that writes, and read-only, scoped and conditional nodes each want to
+  decline or defer it differently (a read-only node never seeds; a
+  scoped writer may be allowed to seed vitals definitions but not
+  register gatehouse permissions; a conditional node seeds when its
+  access is actually up). `Seed` runs each mode's idempotent steps
+  independently and returns a `SeedReport` — which steps ran, which were
+  skipped for lack of a `Writer`, which failed — rather than collapsing
+  everything into one pass/fail. In the asymmetric topology only the
+  designated writer calls it at all; which node that is stays the
+  caller's topology decision, as in `03`.
+- **`OpenDB` is a convenience, not the entry point.** It does steps 1 and
+  2 above and hands back `Stores` — read/write, because that's what a
+  DSN with full privileges gives. A node with narrower access passes a
+  `Stores` built from whatever it actually has (e.g. `OpenDB`'s result
+  with `Writer`s zeroed, or a different provider entirely).
 
 ```mermaid
 flowchart TB
     subgraph PROVIDERS["Where Stores come from (caller's choice)"]
         DBP["OpenDB: db.Open → collect Migrations() →<br/>ProvisionSchemas → Postgres Reader/Writer pairs<br/>(exists today)"]
-        REMOTE["Remote-intermediary or direct-read /<br/>remote-write stores<br/>(not yet built — same interfaces)"]
+        NARROW["Narrowed DB access: some Writers nil,<br/>some bases absent, or a scoped/wrapped store<br/>(caller builds it; same interfaces)"]
+        REMOTE["Remote-intermediary stores<br/>(not yet built — same interfaces)"]
     end
-    STORES["Stores — one Reader/Writer interface pair per base"]
-    NEW["sdk.New(ctx, stores, cfg)"]
-    CHECK{"Writer present<br/>and seeding not skipped?"}
-    SEED["Idempotent seeding, gated by Modes:<br/>RegisterPermissions, SeedBuiltinDefinitions,<br/>EnsurePolicyDefinition"]
-    NOSEED["Read-only node: skip seeding,<br/>writes fail at the missing Writer"]
-    APP["*App — exposes the stores as interface-typed fields"]
+    STORES["Stores — per base: Reader and Writer,<br/>each independently optional"]
+    NEW["sdk.New(stores, cfg)<br/>validate modes against what's present — no I/O"]
+    ERR["Error naming the missing store<br/>(mode enabled, store absent)"]
+    APP["*App — interface-typed store fields"]
+    SEED["app.Seed(ctx) — optional, per-mode,<br/>skipped where Writer is nil → SeedReport"]
     CALLER["Caller passes app.Gatehouse.Reader etc.<br/>to whichever integrations it uses"]
 
     DBP --> STORES
+    NARROW -.-> STORES
     REMOTE -.-> STORES
-    STORES --> NEW --> CHECK
-    CHECK -- "yes" --> SEED --> APP
-    CHECK -- "no" --> NOSEED --> APP
+    STORES --> NEW
+    NEW -- "required store missing" --> ERR
+    NEW -- "ok" --> APP
     APP --> CALLER
+    APP -. "if this node writes" .-> SEED
 ```
+
+### A store-implementation contract the SDK relies on
+
+Scoped and conditional access only stay safe if a narrowed store reports
+*why* it can't answer. `evaluation.Store` already distinguishes "absent"
+(`found == false`, a plain denial) from `err != nil` (propagated up, never
+turned into an allow) — checked in `Evaluate`. So a store that can't see
+something, or can't currently reach its backend, **must return an error,
+not an empty result.** An empty result is indistinguishable from "this
+permission/grant doesn't exist" and would fail closed but for the wrong
+reason, which makes a misconfigured scoped node look like a node whose
+users are simply unauthorized. This isn't stated on the base interfaces'
+doc comments yet — a "not yet" to add alongside the first narrowed store
+implementation, since that's when it becomes testable rather than
+asserted.
+
+Conditional access itself (retry, reconnect, circuit-breaking) belongs in
+the store implementation or a wrapper around it, not in the SDK core —
+the interfaces already give a caller everything it needs to build one.
 
 ## What `sdk` deliberately is *not*
 
@@ -136,8 +182,9 @@ flowchart TB
 [`00-overview.md`](00-overview.md) describes registry, SSO-provider, and
 coordinator behavior as "the same SDK with a few more modes turned on."
 Concretely, a mode gates (a) which `Stores` entries `New` requires, (b)
-which seeding steps run, and — only for `OpenDB` — (c) which migrations
-run. It's never a reason for the core to touch a database itself:
+which steps `Seed` attempts, and — only for `OpenDB` — (c) which
+migrations run. It's never a reason for the core to touch a database
+itself:
 
 | Mode | What turning it on does |
 |---|---|
@@ -193,17 +240,22 @@ own distinction between "not yet" and "never":
 
 ## Build order for the module
 
-1. `sdk/` module scaffold + `Stores`/`Config`/`Modes`/`New`, with seeding
-   gated by modes and by write access. No `db` import in this layer —
-   enforce that with the module's own `go.mod` (the DB-backed provider
-   lives in a separate package, or a separate module, so a node that
-   never touches it never `require`s `db` or pgx).
-2. `OpenDB` — the Postgres provider.
-3. An integration test against real Postgres that builds an `App` twice
-   in a row (proving startup seeding is idempotent end to end), runs one
-   real cross-module flow through the exposed fields — register a
-   permission, `EnsurePrincipal`, grant, then `vitalsauth.WriteReading` —
-   and also builds a read-only `App` (nil `Writer`) over the same data to
-   prove reads work and seeding is skipped. So the SDK's tests exercise
-   composition and the no-direct-DB seam, not each base's own behavior
-   again.
+1. `sdk/` module scaffold + `Stores`/`Config`/`Modes`/`New`: mode-vs-store
+   validation, no I/O. No `db` import in this layer — enforce that with
+   the module's own `go.mod` (the DB-backed provider lives in a separate
+   package, or a separate module, so a node that never touches it never
+   `require`s `db` or pgx).
+2. `Seed` + `SeedReport`: each mode's step independent, skipped (and
+   reported) where its `Writer` is nil.
+3. `OpenDB` — the Postgres provider.
+4. An integration test against real Postgres covering the access shapes,
+   not just the happy path: a full `App` built twice in a row (seeding
+   idempotent end to end) running one real cross-module flow — register a
+   permission, `EnsurePrincipal`, grant, then `vitalsauth.WriteReading`;
+   a read-only `App` (all `Writer`s nil) over the same data, proving
+   reads work and `Seed` reports every step skipped; a scoped `App`
+   with one base absent, proving `New` rejects a mode that needs it and
+   accepts one that doesn't; and a store wrapper that returns an error
+   for one call, proving the error reaches the caller instead of
+   becoming a denial. The SDK's tests exercise composition and the
+   no-direct-DB seams, not each base's own behavior again.
