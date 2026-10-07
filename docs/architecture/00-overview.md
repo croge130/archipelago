@@ -226,6 +226,7 @@ differently; see
 | `15-endpoint-advertisement-model.md` | Endpoints register themselves once; advertisement is a live, permission-filtered query over the same data |
 | `16-trace-log-aggregation-model.md` | Trace context riding on `wire.Message`, an opt-in capture buffer in `logging`, and `traceagg`'s cross-instance collector |
 | `17-sdk-model.md` | The `sdk` module as a storage-agnostic composition root (wire, seed, expose stores) with DB-backed `OpenDB` as one provider, not a second API; modes; read-only, scoped and conditional store access; what stays in-process until a Router exists |
+| `18-peer-discovery-and-capabilities-model.md` | **Draft, nothing built.** Archipelago domains (one `App` per domain), roles/labels/capabilities and core vs. app-defined, the three discovery tiers, a minimal multicast announcement, per-domain listeners, open questions |
 
 Config format split, settled and not up for relitigating without a new
 concrete reason: **XML** for document-shaped content (docs, dashboards),
