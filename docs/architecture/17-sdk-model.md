@@ -15,7 +15,8 @@ phrase "the SDK" suggests.
 
 Every base and integration is built and tested, and each is usable on
 its own. Assembling several of them into a real app means repeating the
-same wiring by hand:
+same wiring by hand. Today the only storage implementation is
+Postgres-backed, so that wiring looks like:
 
 1. Open a `db.Pool`, collect `Migrations()` from each base's
    `storage/dbstore` (gatehouse-core, policy, certstore, alias, vitals —
@@ -30,8 +31,16 @@ same wiring by hand:
    `vitals/facade.SeedBuiltinDefinitions`,
    `vitalsdefaults.EnsurePolicyDefinition`.
 
-None of that is hard, and none of it is interesting — which is exactly
-the shape a composition root is for.
+Steps 1 and 2 are *the DB-backed way of obtaining stores*, not something
+every node does. Steps 3 and 4 are storage-agnostic — they only ever
+see `Reader`/`Writer`/`Store` interfaces. **That split is the key design
+constraint on the SDK**, because a node with no direct database access
+at all is an expected future shape, not an edge case
+([`02-package-boundaries.md`](02-package-boundaries.md) names the
+remote-intermediary and direct-read/remote-write `Store` implementations;
+[`03-multi-instance-and-suites.md`](03-multi-instance-and-suites.md)
+covers the asymmetric topology). Those implementations don't exist yet —
+"not yet", not "never" — but the SDK must not make them impossible.
 
 ## A checked fact the design rests on
 
@@ -46,39 +55,67 @@ the SDK's own build will assert) confirmed that gatehouse-core's single
 `PostgresWriter` satisfies `sessions.Store` and `facade.Writer`; and
 certstore's and alias's reader/writer pairs satisfy their own consumers
 the same way. So the SDK holds **one reader/writer pair per base**, not
-one adapter per integration.
+one adapter per integration — and, since each base's `facade.Reader`/
+`facade.Writer` is an interface, nothing about that claim requires the
+pair to be Postgres-backed.
 
 ## What `sdk` is
 
+Two layers, split exactly along the line above:
+
 ```go
-type Config struct {
-    DB      db.Config
-    Modes   Modes
-    // ... only what a mode genuinely needs (e.g. the SSO signer — see below)
+// Storage-agnostic core: given stores, wire and seed.
+type Stores struct {
+    Gatehouse struct{ Reader gatehouseFacade.Reader; Writer gatehouseFacade.Writer }
+    Policy    struct{ Reader policyFacade.Reader;     Writer policyFacade.Writer }
+    // ... Alias, Certs, Vitals — each optional, per Modes
 }
 
-func Open(ctx context.Context, cfg Config) (*App, error)
-func (a *App) Close()
+func New(ctx context.Context, stores Stores, cfg Config) (*App, error)
+
+// DB-backed provider: the one storage implementation that exists today.
+func OpenDB(ctx context.Context, dbCfg db.Config, modes Modes) (Stores, *db.Pool, error)
 ```
 
-`Open` does steps 1, 2 and 4 above, in that order, and returns an `App`
-whose exported fields are the already-built stores — `App.Gatehouse`,
-`App.Policy`, `App.Alias`, `App.Certs`, `App.Vitals`, each a
-`{Reader, Writer}` pair — plus the `*db.Pool` for callers that need it.
-Step 3 stays the *caller's* call, made against those fields.
+`New` is the real composition root: it validates that the stores a mode
+needs were supplied, runs the idempotent seeding steps (4 above), and
+returns an `App` whose exported fields are those stores — typed as the
+**interfaces**, never as `*PostgresReader`. `OpenDB` is a convenience
+that does steps 1 and 2 and hands back `Stores`; an app that wants the
+common single-node case calls `New(ctx, stores, cfg)` with its result. A
+node with a different storage arrangement skips `OpenDB` and supplies
+`Stores` from wherever its reads and writes actually go. Step 3 stays the
+caller's call, made against the exposed fields.
+
+**Read-only nodes.** Seeding is a *write*, and in the asymmetric topology
+only the designated writer should perform it. So `Config` carries an
+explicit `SkipSeeding` (or, equivalently, `New` treats a `Stores` with a
+nil `Writer` as read-only and seeds nothing). A read-only node still gets
+the full `App` for evaluation and reads; calling a write path on it fails
+at the missing `Writer`, loudly, rather than being silently absent. The
+SDK doesn't invent the policy for *which* node writes — that's the
+caller's topology decision, the same way `03` leaves it.
 
 ```mermaid
 flowchart TB
-    CFG["Config{DB, Modes, ...}"]
-    OPEN["sdk.Open(ctx, cfg)"]
-    POOL["db.Open → *db.Pool"]
-    MIG["Collect Migrations() from each base's dbstore<br/>→ one ProvisionSchemas call"]
-    STORES["One Reader/Writer pair per base<br/>(Gatehouse, Policy, Alias, Certs, Vitals)"]
-    SEED["Idempotent per-startup seeding, gated by Modes:<br/>RegisterPermissions (aliasauth, vitalsauth),<br/>SeedBuiltinDefinitions, EnsurePolicyDefinition"]
-    APP["*App — exposes the stores as fields"]
-    CALLER["Caller picks integrations and passes<br/>app.Gatehouse.Reader etc. to them directly"]
+    subgraph PROVIDERS["Where Stores come from (caller's choice)"]
+        DBP["OpenDB: db.Open → collect Migrations() →<br/>ProvisionSchemas → Postgres Reader/Writer pairs<br/>(exists today)"]
+        REMOTE["Remote-intermediary or direct-read /<br/>remote-write stores<br/>(not yet built — same interfaces)"]
+    end
+    STORES["Stores — one Reader/Writer interface pair per base"]
+    NEW["sdk.New(ctx, stores, cfg)"]
+    CHECK{"Writer present<br/>and seeding not skipped?"}
+    SEED["Idempotent seeding, gated by Modes:<br/>RegisterPermissions, SeedBuiltinDefinitions,<br/>EnsurePolicyDefinition"]
+    NOSEED["Read-only node: skip seeding,<br/>writes fail at the missing Writer"]
+    APP["*App — exposes the stores as interface-typed fields"]
+    CALLER["Caller passes app.Gatehouse.Reader etc.<br/>to whichever integrations it uses"]
 
-    CFG --> OPEN --> POOL --> MIG --> STORES --> SEED --> APP --> CALLER
+    DBP --> STORES
+    REMOTE -.-> STORES
+    STORES --> NEW --> CHECK
+    CHECK -- "yes" --> SEED --> APP
+    CHECK -- "no" --> NOSEED --> APP
+    APP --> CALLER
 ```
 
 ## What `sdk` deliberately is *not*
@@ -98,20 +135,21 @@ flowchart TB
 
 [`00-overview.md`](00-overview.md) describes registry, SSO-provider, and
 coordinator behavior as "the same SDK with a few more modes turned on."
-Concretely, a mode is a `Config` switch that gates (a) which migrations
-run and (b) which seeding steps run — nothing more:
+Concretely, a mode gates (a) which `Stores` entries `New` requires, (b)
+which seeding steps run, and — only for `OpenDB` — (c) which migrations
+run. It's never a reason for the core to touch a database itself:
 
 | Mode | What turning it on does |
 |---|---|
-| (always) | gatehouse-core + db schema, permission registry |
-| Policy | policy schema; required by Vitals' default-group resolution |
-| Alias | alias schema + `aliasauth.RegisterPermissions` |
-| Vitals | vitals schema, `vitalsauth.RegisterPermissions`, `SeedBuiltinDefinitions`; with Policy also on, `EnsurePolicyDefinition` |
-| Certs | certstore schema; required for mTLS identity and SSO |
+| (always) | gatehouse-core stores, permission registry |
+| Policy | policy stores; required by Vitals' default-group resolution |
+| Alias | alias stores + `aliasauth.RegisterPermissions` |
+| Vitals | vitals stores, `vitalsauth.RegisterPermissions`, `SeedBuiltinDefinitions`; with Policy also on, `EnsurePolicyDefinition` |
+| Certs | certstore stores; required for mTLS identity and SSO |
 | SSO provider | needs a ticket-signing `certstoreEvaluation.Signer` supplied in `Config` — the SDK never generates or stores the key itself, matching `12-sso-tickets-model.md`'s "never the mTLS key" rule |
 
 Registry/leases need no mode of their own: `Instance` and `Lease` are
-gatehouse-core tables, always present.
+gatehouse-core records, always part of its stores.
 
 ## What stays in-process until a Router exists
 
@@ -155,13 +193,17 @@ own distinction between "not yet" and "never":
 
 ## Build order for the module
 
-1. `sdk/` module scaffold + `Config`/`Modes`/`Open`/`Close`, with the
-   migration-collection and store-construction steps.
-2. Seeding gated by modes, each step already idempotent in its own
-   module.
-3. An integration test against real Postgres that opens an `App` twice
-   in a row (proving startup seeding is idempotent end to end) and runs
-   one real cross-module flow through the exposed fields — e.g.
-   register a permission, `EnsurePrincipal`, grant, then
-   `vitalsauth.WriteReading` — so the SDK's tests exercise composition,
-   not each base's own behavior again.
+1. `sdk/` module scaffold + `Stores`/`Config`/`Modes`/`New`, with seeding
+   gated by modes and by write access. No `db` import in this layer —
+   enforce that with the module's own `go.mod` (the DB-backed provider
+   lives in a separate package, or a separate module, so a node that
+   never touches it never `require`s `db` or pgx).
+2. `OpenDB` — the Postgres provider.
+3. An integration test against real Postgres that builds an `App` twice
+   in a row (proving startup seeding is idempotent end to end), runs one
+   real cross-module flow through the exposed fields — register a
+   permission, `EnsurePrincipal`, grant, then `vitalsauth.WriteReading` —
+   and also builds a read-only `App` (nil `Writer`) over the same data to
+   prove reads work and seeding is skipped. So the SDK's tests exercise
+   composition and the no-direct-DB seam, not each base's own behavior
+   again.
