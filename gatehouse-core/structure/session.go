@@ -20,12 +20,17 @@ const (
 	SessionKindService    SessionKind = "service"
 	SessionKindAutomation SessionKind = "automation"
 	SessionKindAsserted   SessionKind = "asserted"
+
+	// SessionKindAssumed is work running under principal C's authority,
+	// created by a runner A at B's request, bounded by an expiry. See
+	// docs/architecture/09-gatehouse-core-model.md, "Assumed sessions."
+	SessionKindAssumed SessionKind = "assumed"
 )
 
 func (k SessionKind) Valid() bool {
 	switch k {
 	case SessionKindUI, SessionKindCLI, SessionKindAgent, SessionKindService,
-		SessionKindAutomation, SessionKindAsserted:
+		SessionKindAutomation, SessionKindAsserted, SessionKindAssumed:
 		return true
 	default:
 		return false
@@ -56,11 +61,16 @@ type Session struct {
 	AuthorityLevel        AuthorityLevel
 	AuthenticationMethod  AuthenticationMethod
 	AssertedByPrincipalID *uuid.UUID
-	Metadata              json.RawMessage
-	CreatedAt             time.Time
-	ExpiresAt             *time.Time
-	LastSeen              time.Time
-	RevokedAt             *time.Time
+
+	// RequestedByPrincipalID is B in an assumed session: who asked for
+	// the work. Valid only when Kind is SessionKindAssumed.
+	RequestedByPrincipalID *uuid.UUID
+
+	Metadata  json.RawMessage
+	CreatedAt time.Time
+	ExpiresAt *time.Time
+	LastSeen  time.Time
+	RevokedAt *time.Time
 }
 
 func (s Session) Validate() error {
@@ -76,8 +86,39 @@ func (s Session) Validate() error {
 	if !s.AuthorityLevel.Valid() {
 		return fmt.Errorf("structure: session: invalid AuthorityLevel %q", s.AuthorityLevel)
 	}
-	if s.Kind != SessionKindAsserted && s.AssertedByPrincipalID != nil {
-		return fmt.Errorf("structure: session: AssertedByPrincipalID is only valid when Kind is %q", SessionKindAsserted)
+	if s.Kind != SessionKindAsserted && s.Kind != SessionKindAssumed && s.AssertedByPrincipalID != nil {
+		return fmt.Errorf("structure: session: AssertedByPrincipalID is only valid when Kind is %q or %q", SessionKindAsserted, SessionKindAssumed)
+	}
+	if s.Kind != SessionKindAssumed && s.RequestedByPrincipalID != nil {
+		return fmt.Errorf("structure: session: RequestedByPrincipalID is only valid when Kind is %q", SessionKindAssumed)
+	}
+	if s.Kind == SessionKindAssumed {
+		return s.validateAssumed()
+	}
+	return nil
+}
+
+// validateAssumed holds the rules specific to an assumed session: it is
+// created by one principal (A, AssertedByPrincipalID) for another (B,
+// RequestedByPrincipalID) to run as a third (C, PrincipalID); it is
+// time-bounded by definition; and it never carries more than standard
+// authority, which is also how "recovery_access is never assumable"
+// (09-gatehouse-core-model.md) is enforced.
+func (s Session) validateAssumed() error {
+	if s.AssertedByPrincipalID == nil || *s.AssertedByPrincipalID == uuid.Nil {
+		return fmt.Errorf("structure: session: an assumed session requires AssertedByPrincipalID (the creator)")
+	}
+	if s.RequestedByPrincipalID == nil || *s.RequestedByPrincipalID == uuid.Nil {
+		return fmt.Errorf("structure: session: an assumed session requires RequestedByPrincipalID (the requester)")
+	}
+	if s.ExpiresAt == nil {
+		return fmt.Errorf("structure: session: an assumed session requires ExpiresAt")
+	}
+	if s.AuthorityLevel != AuthorityLevelStandard {
+		return fmt.Errorf("structure: session: an assumed session must have %q authority, got %q", AuthorityLevelStandard, s.AuthorityLevel)
+	}
+	if s.CredentialID != nil {
+		return fmt.Errorf("structure: session: an assumed session carries no CredentialID; nothing authenticates as it")
 	}
 	return nil
 }

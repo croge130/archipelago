@@ -22,6 +22,15 @@ import (
 
 func setupFacadeTest(t *testing.T) (Reader, Writer) {
 	t.Helper()
+	reader, writer, _ := setupFacadeTestWithPool(t)
+	return reader, writer
+}
+
+// setupFacadeTestWithPool is setupFacadeTest for tests that also need to
+// reach the database directly (for example to revoke a grant, which the
+// Writer interface deliberately has no operation for yet).
+func setupFacadeTestWithPool(t *testing.T) (Reader, Writer, *archidb.Pool) {
+	t.Helper()
 	dsn := os.Getenv("ARCHIPELAGO_TEST_DATABASE_URL")
 	if dsn == "" {
 		t.Skip("ARCHIPELAGO_TEST_DATABASE_URL not set; skipping facade integration test")
@@ -56,7 +65,7 @@ func setupFacadeTest(t *testing.T) (Reader, Writer) {
 		t.Fatalf("truncate: %v", err)
 	}
 
-	return dbstore.NewPostgresReader(pool.Pgx()), dbstore.NewPostgresWriter(pool.Pgx())
+	return dbstore.NewPostgresReader(pool.Pgx()), dbstore.NewPostgresWriter(pool.Pgx()), pool
 }
 
 func TestEnsurePrincipalCreatesOnce(t *testing.T) {

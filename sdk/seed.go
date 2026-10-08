@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/croge130/archipelago/aliasauth"
+	gatehouseFacade "github.com/croge130/archipelago/gatehouse-core/facade"
 	vitalsFacade "github.com/croge130/archipelago/vitals/facade"
 	"github.com/croge130/archipelago/vitalsauth"
 	"github.com/croge130/archipelago/vitalsdefaults"
@@ -71,6 +72,11 @@ func (a *App) Seed(ctx context.Context) (SeedReport, error) {
 	}
 
 	gatehouseWritable := a.Gatehouse.Reader != nil && a.Gatehouse.Writer != nil
+	if a.Modes.Gatehouse {
+		run("gatehouse.RegisterAssumePermissions", gatehouseWritable, "no Gatehouse Writer", func() error {
+			return gatehouseFacade.RegisterAssumePermissions(ctx, a.Gatehouse.Reader, a.Gatehouse.Writer)
+		})
+	}
 	if a.Modes.Alias && a.Modes.Gatehouse {
 		run("aliasauth.RegisterPermissions", gatehouseWritable, "no Gatehouse Writer", func() error {
 			return aliasauth.RegisterPermissions(ctx, a.Gatehouse.Reader, a.Gatehouse.Writer)

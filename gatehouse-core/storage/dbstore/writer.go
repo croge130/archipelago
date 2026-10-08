@@ -99,11 +99,11 @@ func (w *PostgresWriter) CreateSession(ctx context.Context, s structure.Session)
 	_, err := w.pool.Exec(ctx,
 		`INSERT INTO gatehouse_sessions (
 			session_id, principal_id, credential_id, kind, authority_level, authentication_method,
-			asserted_by_principal_id, metadata, created_at, expires_at, last_seen, revoked_at
-		 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+			asserted_by_principal_id, requested_by_principal_id, metadata, created_at, expires_at, last_seen, revoked_at
+		 ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
 		uuidToText(s.SessionID), uuidToText(s.PrincipalID), nullableUUIDToText(s.CredentialID),
 		string(s.Kind), string(s.AuthorityLevel), string(s.AuthenticationMethod),
-		nullableUUIDToText(s.AssertedByPrincipalID), nullableJSON(s.Metadata),
+		nullableUUIDToText(s.AssertedByPrincipalID), nullableUUIDToText(s.RequestedByPrincipalID), nullableJSON(s.Metadata),
 		s.CreatedAt, s.ExpiresAt, s.LastSeen, s.RevokedAt,
 	)
 	if err != nil {

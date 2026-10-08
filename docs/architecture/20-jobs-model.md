@@ -344,8 +344,8 @@ surface would not be.
 2. **`jobsauth`** — `jobs` + Gatehouse-core: queue-context permissions,
    the authority modes above, and minting and revoking the assumed session
    at claim.
-   Gatehouse-core itself gains the `assumed` session kind and
-   `AssumeSession` (`09`); that is a prerequisite and is not part of `jobs`.
+   Gatehouse-core's `assumed` session kind and `AssumeSession` (`09`) are
+   a prerequisite for this, are **built**, and are not part of `jobs`.
 3. **`noderoles` + `jobs`** — the executor node role claims through the
    governor's admission; the housekeeping node roles live here.
 4. **`jobs` + Transit** — the pushed-delivery path, once a Router exists.

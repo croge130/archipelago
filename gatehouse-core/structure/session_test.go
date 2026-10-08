@@ -79,3 +79,63 @@ func TestAuthorityLevelMeets(t *testing.T) {
 		}
 	}
 }
+
+func validAssumedSession() Session {
+	creator, requester := uuid.New(), uuid.New()
+	exp := time.Now().Add(time.Minute)
+	s := validSession()
+	s.Kind = SessionKindAssumed
+	s.AssertedByPrincipalID = &creator
+	s.RequestedByPrincipalID = &requester
+	s.ExpiresAt = &exp
+	return s
+}
+
+func TestAssumedSessionValidateOK(t *testing.T) {
+	if err := validAssumedSession().Validate(); err != nil {
+		t.Fatalf("expected a valid assumed session to validate, got: %v", err)
+	}
+}
+
+func TestAssumedSessionRequiresCreatorRequesterAndExpiry(t *testing.T) {
+	for name, mutate := range map[string]func(*Session){
+		"no creator":   func(s *Session) { s.AssertedByPrincipalID = nil },
+		"no requester": func(s *Session) { s.RequestedByPrincipalID = nil },
+		"no expiry":    func(s *Session) { s.ExpiresAt = nil },
+	} {
+		s := validAssumedSession()
+		mutate(&s)
+		if err := s.Validate(); err == nil {
+			t.Errorf("%s: expected rejection, got nil", name)
+		}
+	}
+}
+
+func TestAssumedSessionIsNeverElevatedOrRecoveryOrCredentialed(t *testing.T) {
+	for _, level := range []AuthorityLevel{AuthorityLevelElevated, AuthorityLevelRecoveryAccess} {
+		s := validAssumedSession()
+		s.AuthorityLevel = level
+		if err := s.Validate(); err == nil {
+			t.Errorf("an assumed session at %q authority should be rejected", level)
+		}
+	}
+	s := validAssumedSession()
+	cred := uuid.New()
+	s.CredentialID = &cred
+	if err := s.Validate(); err == nil {
+		t.Error("an assumed session carrying a CredentialID should be rejected")
+	}
+}
+
+func TestRequestedByIsOnlyValidOnAssumedSessions(t *testing.T) {
+	s := validSession()
+	id := uuid.New()
+	s.RequestedByPrincipalID = &id
+	if err := s.Validate(); err == nil {
+		t.Fatal("expected RequestedByPrincipalID on a non-assumed session to be rejected")
+	}
+	s.Kind = SessionKindAsserted
+	if err := s.Validate(); err == nil {
+		t.Fatal("expected RequestedByPrincipalID on an asserted session to be rejected")
+	}
+}

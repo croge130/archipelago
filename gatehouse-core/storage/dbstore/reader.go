@@ -135,15 +135,15 @@ func (r *PostgresReader) GetCredentialByMTLSFingerprint(ctx context.Context, fin
 func (r *PostgresReader) GetSession(ctx context.Context, id uuid.UUID) (structure.Session, bool, error) {
 	var s structure.Session
 	var sessionIDText, principalIDText, kind, authorityLevel, authMethod string
-	var credentialIDText, assertedByText *string
+	var credentialIDText, assertedByText, requestedByText *string
 	var metadata []byte
 	err := r.pool.QueryRow(ctx,
 		`SELECT session_id, principal_id, credential_id, kind, authority_level, authentication_method,
-		        asserted_by_principal_id, metadata, created_at, expires_at, last_seen, revoked_at
+		        asserted_by_principal_id, requested_by_principal_id, metadata, created_at, expires_at, last_seen, revoked_at
 		 FROM gatehouse_sessions WHERE session_id = $1`,
 		uuidToText(id),
 	).Scan(&sessionIDText, &principalIDText, &credentialIDText, &kind, &authorityLevel, &authMethod,
-		&assertedByText, &metadata, &s.CreatedAt, &s.ExpiresAt, &s.LastSeen, &s.RevokedAt)
+		&assertedByText, &requestedByText, &metadata, &s.CreatedAt, &s.ExpiresAt, &s.LastSeen, &s.RevokedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return structure.Session{}, false, nil
@@ -161,6 +161,9 @@ func (r *PostgresReader) GetSession(ctx context.Context, id uuid.UUID) (structur
 	}
 	if s.AssertedByPrincipalID, err = parseNullableUUID(assertedByText); err != nil {
 		return structure.Session{}, false, fmt.Errorf("dbstore: parse asserted_by_principal_id: %w", err)
+	}
+	if s.RequestedByPrincipalID, err = parseNullableUUID(requestedByText); err != nil {
+		return structure.Session{}, false, fmt.Errorf("dbstore: parse requested_by_principal_id: %w", err)
 	}
 	s.Kind = structure.SessionKind(kind)
 	s.AuthorityLevel = structure.AuthorityLevel(authorityLevel)

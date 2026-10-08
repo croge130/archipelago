@@ -281,12 +281,12 @@ SessionRecord
                         absent for a service-mediated record that's
                         authoritative but never itself bearer-usable
 - session_kind          ui | cli | agent | service | automation | asserted
-                        | assumed  (designed, not yet built — see below)
+                        | assumed  (see "Assumed sessions" below)
 - authority_level       standard | elevated | recovery_access
 - authentication_method
 - asserted_by_principal_id?   set when this session's proof came from
                               somewhere other than local credentials
-- requested_by_principal_id?  (assumed sessions only — not yet built)
+- requested_by_principal_id?  (assumed sessions only)
 - metadata               opaque, never authorized on
 - created_at / expires_at? / last_seen / revoked_at?
 ```
@@ -315,10 +315,13 @@ does gets the integration adding a connection reference on top, without
 the base record ever needing to change for it — the structure/
 evaluation/storage split doing exactly what it's for.
 
-## Assumed sessions — confirmed design, not yet built
+## Assumed sessions — confirmed, built
 
-*Arose from designing the job system (`20-jobs-model.md`); the shape is
-decided, the code does not exist.*
+*Arose from designing the job system (`20-jobs-model.md`). Built in
+`gatehouse-core`: `structure.SessionKindAssumed`, migration 0023, and
+`facade.AssumeSession`, `ValidateAssumedSession`,
+`RequireAssumedPermission` / `RequireAssumedContextPermission` and
+`RegisterAssumePermissions`.*
 
 Some work runs on a different node from the one that asked for it, under
 the authority of a third principal. Four facts are involved, and
@@ -355,9 +358,22 @@ Kubernetes impersonation, and `sudo -u`:
 2. *The creator may execute as C.* A grant from C's side to A. Implicit
    when C is A.
 
-Both are checked when the session is created and again as the work runs,
-because grants get revoked. Permission and context names are provisional.
-`recovery_access` is never assumable.
+Both are checked when the session is created and again as the work runs
+(`ValidateAssumedSession` re-checks them on every use), because grants
+get revoked. The two permissions are `gatehouse.assume.cause` and
+`gatehouse.assume.execute`, scoped to the context type
+`gatehouse.principal` with C's ID; neither is wildcard-includable, so a
+`gatehouse.*` grant cannot silently let its holder act as anyone. Names
+are still provisional.
+
+**What `Validate` enforces for this kind:** a creator, a requester and an
+expiry are required; authority is `standard` only, which is how
+"`recovery_access` is never assumable" is made true (an elevated session
+is refused too); and no `credential_id` — nothing authenticates *as* an
+assumed session, which is what keeps it from becoming ambient authority.
+A denial is `ErrAssumeNotPermitted`; a store failure is returned as
+itself, never as a denial. Expiry is judged against the calling node's
+clock, the same single-clock caveat the lease code has.
 
 **Scope is not a field of the session.** The thing that wants the
 authority (a job's task kind, for instance) declares the permissions it

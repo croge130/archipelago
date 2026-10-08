@@ -27,6 +27,7 @@ Postgres-backed, so that wiring looks like:
    interface (`peerauth.Store`, `certcred.GatehouseStore`,
    `sso.PrincipalStore`, `sessions.Store`, …).
 4. On every startup, run the idempotent seeding steps:
+   `gatehouse/facade.RegisterAssumePermissions`,
    `aliasauth.RegisterPermissions`, `vitalsauth.RegisterPermissions`,
    `vitals/facade.SeedBuiltinDefinitions`,
    `vitalsdefaults.EnsurePolicyDefinition`.
@@ -193,7 +194,7 @@ enables just `Vitals` and gets the narrower set of seeding steps.
 
 | Enabled | Requires | Seeding steps it adds |
 |---|---|---|
-| `Gatehouse` | `Stores.Gatehouse.Reader` | — (registry/leases need no mode of their own: `Instance`/`Lease` are Gatehouse-core records) |
+| `Gatehouse` | `Stores.Gatehouse.Reader` | `RegisterAssumePermissions` (registry/leases need no mode of their own: `Instance`/`Lease` are Gatehouse-core records) |
 | `Policy` | `Stores.Policy.Reader` | — |
 | `Alias` | `Stores.Alias.Reader` | with `Gatehouse`: `aliasauth.RegisterPermissions` |
 | `Vitals` | `Stores.Vitals.Reader` | `SeedBuiltinDefinitions`; with `Gatehouse`: `vitalsauth.RegisterPermissions`; with `Policy`: `vitalsdefaults.EnsurePolicyDefinition` |

@@ -74,13 +74,21 @@ func TestFullAppSeedsIdempotentlyAndComposesAcrossModules(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Seed #%d: %v (report %+v)", i+1, err, report)
 		}
-		if len(report) != 4 {
-			t.Fatalf("Seed #%d report has %d steps, want 4: %+v", i+1, len(report), report)
+		if len(report) != 5 {
+			t.Fatalf("Seed #%d report has %d steps, want 5: %+v", i+1, len(report), report)
 		}
 		for _, step := range report {
 			if step.Status != sdk.SeedRan {
 				t.Fatalf("Seed #%d step %s = %s, want ran", i+1, step.Name, step.Status)
 			}
+		}
+	}
+
+	// Seeding registered Gatehouse-core's own assume permissions.
+	check := newApp(t, stores, allModes)
+	for _, key := range []string{gatehouseFacade.PermissionAssumeCause, gatehouseFacade.PermissionAssumeExecute} {
+		if _, found, err := check.Gatehouse.Reader.GetPermissionDefinition(ctx, key); err != nil || !found {
+			t.Fatalf("%s not registered by Seed: found=%v err=%v", key, found, err)
 		}
 	}
 
@@ -132,8 +140,8 @@ func TestReadOnlyAppReadsExistingDataAndSeedsNothing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read-only Seed returned error: %v", err)
 	}
-	if len(report) != 4 {
-		t.Fatalf("report has %d steps, want 4: %+v", len(report), report)
+	if len(report) != 5 {
+		t.Fatalf("report has %d steps, want 5: %+v", len(report), report)
 	}
 	for _, step := range report {
 		if step.Status != sdk.SeedSkipped {

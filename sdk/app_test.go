@@ -77,8 +77,8 @@ func TestSeedSkipsEveryStepWhenNodeIsReadOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Seed: %v", err)
 	}
-	if len(report) != 3 {
-		t.Fatalf("report has %d steps, want 3: %+v", len(report), report)
+	if len(report) != 4 {
+		t.Fatalf("report has %d steps, want 4: %+v", len(report), report)
 	}
 	for _, step := range report {
 		if step.Status != SeedSkipped {
@@ -94,13 +94,27 @@ func TestSeedSkipsEveryStepWhenNodeIsReadOnly(t *testing.T) {
 }
 
 func TestSeedOmitsStepsForDisabledModes(t *testing.T) {
+	// Gatehouse alone: only its own step applies. Alias, Vitals and
+	// Policy steps must not appear at all.
 	app, err := New(gatehouseOnly(), Modes{Gatehouse: true}, Config{})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	report, err := app.Seed(context.Background())
-	if err != nil || len(report) != 0 {
-		t.Fatalf("Seed = %+v, %v; want empty report and nil error", report, err)
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	if len(report) != 1 || report[0].Name != "gatehouse.RegisterAssumePermissions" || report[0].Status != SeedSkipped {
+		t.Fatalf("report = %+v; want exactly the gatehouse step, skipped (no Writer)", report)
+	}
+
+	// No modes at all: nothing applies.
+	none, err := New(Stores{}, Modes{}, Config{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if report, err := none.Seed(context.Background()); err != nil || len(report) != 0 {
+		t.Fatalf("Seed with no modes = %+v, %v; want empty report and nil error", report, err)
 	}
 }
 
