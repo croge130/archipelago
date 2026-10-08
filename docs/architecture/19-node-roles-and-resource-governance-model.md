@@ -1,4 +1,4 @@
-# Adopting roles, and bounding what they cost
+# Adopting node roles, and bounding what they cost
 
 **Status: design draft. Nothing here is built.** Like
 [`18-peer-discovery-and-capabilities-model.md`](18-peer-discovery-and-capabilities-model.md),
@@ -6,20 +6,20 @@ which this builds on, it pins vocabulary and boundaries first.
 
 ## The idea
 
-A node can **adopt a role** — "retention sweeper", "task executor",
+A node can **adopt a node role** — "retention sweeper", "task executor",
 "task director", an app-defined one — and by doing so agree to run that
-role's **duties** automatically, configured by the domain's policy,
+node role's **duties** automatically, configured by the domain's policy,
 without the app being heavily involved. Duties are often *scheduled*:
 database maintenance, clean-ups, heartbeats, or generic tasks the node
 carries out for others, or hands to another node. The counterpart
-requirement is that the node is never overwhelmed by roles outside its own
+requirement is that the node is never overwhelmed by node roles outside its own
 application work without its consent. So there are three cooperating
 pieces, deliberately separate:
 
 | Piece | Question it answers | Scope |
 |---|---|---|
-| **Role runtime** | *Which* duties exist, under whose authority, configured how? | Per domain (one per `App`) |
-| **Local scheduler** | *When* is a duty due? | Per domain's roles, one clock |
+| **Node role runtime** | *Which* duties exist, under whose authority, configured how? | Per domain (one per `App`) |
+| **Local scheduler** | *When* is a duty due? | Per domain's node roles, one clock |
 | **Resource governor** | *Whether and how much* may it run right now? | **Per node**, across every domain |
 
 The scheduler decides a duty is due and submits it; the governor admits,
@@ -35,42 +35,42 @@ to.
 
 ## Vocabulary
 
-- **Role definition** — a key, a description, its duties, the permissions
+- **Node role definition** — a key, a description, its duties, the permissions
   those duties need, the Policy definitions that configure it, whether it
   is exclusive (**no, unless it says so** — see below), and a *default
-  budget*. Core roles live under a reserved
-  namespace owned by the base that defines them; app-defined roles are
+  budget*. Core node roles live under a reserved
+  namespace owned by the base that defines them; app-defined node roles are
   anything else, exactly the core/app split `18` already makes, using the
   same reserved-namespace map.
-- **Duty** — one unit of automatic work within a role: a trigger and a
+- **Duty** — one unit of automatic work within a node role: a trigger and a
   function. What triggers it is the local scheduler's business (below).
 - **Task** — a duty's unit of execution: it has an id, a kind, parameters
   and a deadline. A local duty creates its own tasks; a *directed* task
   arrives from another node.
-- **Executor** — a role: this node carries out tasks of stated kinds,
+- **Executor** — a node role: this node carries out tasks of stated kinds,
   including ones directed at it by others.
-- **Director** — a role: this node decides that a task should run and
+- **Director** — a node role: this node decides that a task should run and
   sends it to an executor, rather than running it itself.
-- **Adoption** — a node-local decision, per domain, to run a role. It is
+- **Adoption** — a node-local decision, per domain, to run a node role. It is
   **configuration, not database state**, so a node with no direct
-  database access ([`17`](17-sdk-model.md)) can adopt roles. It may also
-  be advertised to peers as a role claim, which `18` already treats as an
+  database access ([`17`](17-sdk-model.md)) can adopt node roles. It may also
+  be advertised to peers as a node role claim, which `18` already treats as an
   unverified hint.
-- **Budget** — the limits a role's work runs under (below).
+- **Budget** — the limits a node role's work runs under (below).
 
 ## Two keys, not one
 
 Adoption needs **both**:
 
 1. **The node opts in** (local configuration). Nothing a domain's policy
-   says can make a node run a role it did not adopt.
+   says can make a node run a node role it did not adopt.
 2. **Policy configures it** (the domain's Policy values, resolved with the
    existing machinery in [`10`](10-typedvalue-and-policy-model.md)):
    intervals, targets, what "applicable" means.
 
-Opt-in without policy runs the role's declared defaults. Policy without
+Opt-in without policy runs the node role's declared defaults. Policy without
 opt-in does nothing. *Not yet:* a domain *inviting* nodes (by label) to
-adopt a role. That would be a request the node still has to accept, and it
+adopt a node role. That would be a request the node still has to accept, and it
 needs the label type `18` leaves open.
 
 ## The consent rule, and why Policy's clamp direction is inverted here
@@ -86,8 +86,8 @@ configuration applied *after* policy resolution, in code:
 
 ```mermaid
 flowchart TB
-    POL["Domain Policy resolves a requested budget<br/>for role R (10-typedvalue-and-policy-model.md)"]
-    ROLE["Role R's declared default budget<br/>(used if policy sets none)"]
+    POL["Domain Policy resolves a requested budget<br/>for node role R (10-typedvalue-and-policy-model.md)"]
+    ROLE["Node role R's declared default budget<br/>(used if policy sets none)"]
     DOM["Per-domain share of the node ceiling<br/>(local config)"]
     NODE["Node-wide ceiling<br/>(local config — the consent boundary)"]
     CLAMP["Clamp requested ≤ domain share ≤ node ceiling<br/>(typeconstraints.Set.Clamp, per dimension)"]
@@ -102,9 +102,9 @@ flowchart TB
     CLAMP --> RUN
 ```
 
-Nothing is run with an unstated budget either. A role declares a default
+Nothing is run with an unstated budget either. A node role declares a default
 budget, and **adopting it requires acknowledging one**: the node's config
-either sets an explicit budget or says "use the role's default." There is
+either sets an explicit budget or says "use the node role's default." There is
 no silent default — adoption is consent to *this much* work.
 
 ## What a budget can actually bound
@@ -113,7 +113,7 @@ Go has no per-goroutine CPU or memory limit, and "threads" are goroutines
 multiplexed by a process-wide scheduler. So the governor's limits are
 **cooperative** and are stated in terms the runtime can really enforce:
 
-- **Concurrency** — at most N of a role's duties running at once (a
+- **Concurrency** — at most N of a node role's duties running at once (a
   bounded worker pool or semaphore). This is the practical meaning of
   "how many threads or tasks."
 - **Queue depth, with a stated overflow behavior** — when work arrives
@@ -125,9 +125,9 @@ multiplexed by a process-wide scheduler. So the governor's limits are
 
 **Budgets are tiers first, numbers second.** Rather than asking a node to
 reason about bytes, the common vocabulary is a coarse tier — `low`,
-`medium`, `high` — and the node's config says `budget = low`. The role
+`medium`, `high` — and the node's config says `budget = low`. The node role
 author, who knows what its own work costs, declares what each tier means
-for *that role* (for example a batch size, a concurrency, a queue depth
+for *that node role* (for example a batch size, a concurrency, a queue depth
 and a rate); the node ceiling then clamps those numbers as usual. Explicit
 numbers remain available for the dimensions the governor can really
 enforce (concurrency, queue depth, rate, timeout) as an escape hatch.
@@ -139,10 +139,10 @@ remains the operating system's job.
 
 ### Priority: "I care about this more"
 
-When resources are genuinely limited, the app can say which role or task
+When resources are genuinely limited, the app can say which node role or task
 it cares about more. Priority is a small, named, ordered set rather than a
 number — `background`, `normal`, `important`, `critical` — in the same
-coarse spirit as the budget tiers. The app sets it per adopted role and per
+coarse spirit as the budget tiers. The app sets it per adopted node role and per
 registered task kind.
 
 1. **Priority only matters under contention.** With room to spare, it does
@@ -155,7 +155,7 @@ registered task kind.
    below `important`.
 4. **It does not preempt.** Running work is not killed to make room unless
    that duty explicitly opted into cancellation.
-5. **It does not buy extra budget.** A `critical` role still runs inside
+5. **It does not buy extra budget.** A `critical` node role still runs inside
    its tier and the node ceiling. Priority orders work inside the budget; it
    never raises it.
 6. **A remote party cannot set it.** A job may carry a priority hint, but
@@ -172,11 +172,11 @@ Real CPU and memory isolation belongs to the operating system (cgroups,
 container limits). The governor is compatible with that and does not
 replace it; this doc does not try to.
 
-**The app's own work is protected by construction.** Role work runs in
+**The app's own work is protected by construction.** Node role work runs in
 the governor's pools, separate from whatever the app runs for its own
 functions, and the node ceiling is sized so those pools cannot starve the
 rest. The app can also tell the governor it is busy through a yield hook,
-and role work then pauses or sheds — the "without its consent" half of the
+and node role work then pauses or sheds — the "without its consent" half of the
 requirement made concrete.
 
 Budget values themselves are natural `typedvalue`s (a count, a rate, a
@@ -193,23 +193,23 @@ records `actor_principal`, `requested_by_principal` and
 - Duties run under `service_action` — the node acting under its own
   standing authority in that domain — or `scheduled_task` when a
   scheduler triggered them.
-- A role declares the permissions its duties need and registers them like
-  any other (`RegisterPermission`). An adopted role whose node's principal
+- A node role declares the permissions its duties need and registers them like
+  any other (`RegisterPermission`). An adopted node role whose node's principal
   lacks the grants **fails closed and says so**; it does not silently
   skip.
 - `recovery_elevation` is never delegable to scheduled work (`09`), so no
-  role can acquire it.
+  node role can acquire it.
 
-## Exclusive roles use leases
+## Exclusive node roles use leases
 
-**Roles are not unique unless they say so, and exclusive roles are
+**Node roles are not unique unless they say so, and exclusive node roles are
 permitted but discouraged:** prefer a design where several nodes can hold
-the role at once. Most roles — an executor, a retention sweeper — are safe,
+the node role at once. Most node roles — an executor, a retention sweeper — are safe,
 and often better, run by many nodes at once. Exclusivity is an explicit,
-opt-in property of a role definition, for the cases where a single holder
+opt-in property of a node role definition, for the cases where a single holder
 really is the simplest correct design.
 
-A role that must have exactly one holder per group (a leader) is a
+A node role that must have exactly one holder per group (a leader) is a
 [`13`](13-registry-and-leases-model.md) lease:
 `(Group, Name)` held by one `Instance`. Its duties run only while the
 lease is held, and losing it cancels them through their context.
@@ -217,7 +217,7 @@ lease is held, and losing it cancels them through their context.
 `13` calls a lease "a liveness primitive, not a security boundary," and
 the same reasoning means it is not a fencing token either. That matters
 here: after expiry, a slow previous holder can
-briefly overlap with a new one. So **a duty of an exclusive role must be
+briefly overlap with a new one. So **a duty of an exclusive node role must be
 idempotent**, rather than assuming the lease alone guarantees single
 execution. Fencing tokens are not designed in; if a duty cannot be made
 idempotent it is probably the wrong thing to make exclusive.
@@ -225,7 +225,7 @@ idempotent it is probably the wrong thing to make exclusive.
 ## The local scheduler
 
 The first revision of this doc treated scheduling as a separate,
-deferred "Beacon-equivalent" system. That undersold it: a role that runs
+deferred "Beacon-equivalent" system. That undersold it: a node role that runs
 duties automatically *needs* something that says when each is due, so a
 local scheduler is part of this design. The durable side — queues,
 retries, work handed across boundaries — is the job system, also in
@@ -253,11 +253,11 @@ storage simply gets *skip* semantics, because it cannot know what it
 missed; the choice is therefore not available to every node, and the doc
 for a duty has to say which it needs.
 
-**Schedules are configuration.** A role declares a default schedule, and
-the domain's Policy may override it. A role can also declare a *floor*
+**Schedules are configuration.** A node role declares a default schedule, and
+the domain's Policy may override it. A node role can also declare a *floor*
 (for example "no more often than every ten seconds") as a
 `typeconstraints` bound, so a policy value cannot ask for a schedule the
-role was never designed to withstand. Clamps are reported, as for budgets.
+node role was never designed to withstand. Clamps are reported, as for budgets.
 
 **What the scheduler is not.** It is in-process. It has no durable
 queue, no cross-node deduplication, and no workflow. Anything that must
@@ -266,9 +266,9 @@ the job system below, which the scheduler feeds rather than replaces.
 
 ## Three kinds of scheduled work
 
-| Kind | Role | Example | Needs Transit? |
+| Kind | Node role | Example | Needs Transit? |
 |---|---|---|---|
-| **Local duty** | any role | prune this node's own history tables; renew a lease; heartbeat | No |
+| **Local duty** | any node role | prune this node's own history tables; renew a lease; heartbeat | No |
 | **Executor** | task executor | carry out a task of an advertised kind that someone else sent | Yes, to receive |
 | **Director** | task director | decide a task is due and send it to an executor | Yes, to send |
 
@@ -276,7 +276,7 @@ Local duties are the immediately useful kind and have no Transit
 dependency, so they can be built before the Router exists. A concrete
 first candidate: `registry`'s `Heartbeat` and lease renewal are today the
 *caller's* job to remember ([`13`](13-registry-and-leases-model.md) built
-the mechanism and no background driver); a core role could own that.
+the mechanism and no background driver); a core node role could own that.
 
 ### Directing a task to another node
 
@@ -326,11 +326,11 @@ Design points that follow from earlier docs:
   must be able to try again, possibly elsewhere, so the same task can
   arrive twice. Exactly-once is not attempted. The executor deduplicates by
   `TaskID` within a bounded window, and tasks must be idempotent where
-  duplicate execution would matter, the same requirement exclusive roles
+  duplicate execution would matter, the same requirement exclusive node roles
   have.
 - **Discovery of executors** is `18`'s: ask a peer what it offers, after
   the connection. An executable task kind is a capability, and "executor
-  of kind K" is a role claim that is verified by the executor accepting
+  of kind K" is a node role claim that is verified by the executor accepting
   the task.
 - **A task kind is not an endpoint.** Being able to perform a kind of job
   does not mean exposing an additional endpoint for it. Task kinds have
@@ -357,7 +357,7 @@ only task kinds it has *registered a handler for*. A job carries **data**:
 a task kind and parameters validated against that kind's `typedvalue`
 schema. It never carries code, a script, or a command line. A job naming a
 kind the node has no handler for is rejected, not interpreted. Registering
-a handler *is* adopting the executor role for that kind, which is also what
+a handler *is* adopting the executor node role for that kind, which is also what
 makes "executor of kind K" a capability worth advertising (`18`). It does
 **not** create an endpoint: a task kind is registered in its own task
 registry, separate from `15`'s endpoint registry, and a job is delivered
@@ -413,29 +413,29 @@ Following the project's module-per-dependency-unit rule:
   a catch-up record is wired in by an integration.
 - **`jobs`** — the durable job base described above; no dependency on any
   other base.
-- **`roles`** — role definitions, adoption, and the runner, depending on
+- **`noderoles`** — node role definitions, adoption, and the runner, depending on
   `governor`, `scheduler` and `logging` only.
 - Integrations, each importing exactly the two bases it combines:
-  `roles` + Policy (resolve budgets, schedules, config), `roles` +
-  Gatehouse-core (principal and permission checks), `roles` +
-  registry/leases (exclusivity), `roles` + Vitals (report duty health and
-  clamps), `roles` + `jobs` (executors claiming work), `jobs` +
-  Gatehouse-core (submission permission per kind), and `roles` + Transit
+  `noderoles` + Policy (resolve budgets, schedules, config), `noderoles` +
+  Gatehouse-core (principal and permission checks), `noderoles` +
+  registry/leases (exclusivity), `noderoles` + Vitals (report duty health and
+  clamps), `noderoles` + `jobs` (executors claiming work), `jobs` +
+  Gatehouse-core (submission permission per kind), and `noderoles` + Transit
   (executor receiving and director sending, once a Router exists).
 - **`sdk`**: `Config` gains a *shared* `Governor` handed to every `App` on
-  the node, and a list of adopted roles per `App`.
+  the node, and a list of adopted node roles per `App`.
 
 ## Decisions so far
 
-1. **Roles are non-unique by default**, and exclusive roles are permitted
+1. **Node roles are non-unique by default**, and exclusive node roles are permitted
    but discouraged in favor of designs that several nodes can hold. Duties
-   of an exclusive role must be idempotent; fencing tokens are not
+   of an exclusive node role must be idempotent; fencing tokens are not
    designed in.
-2. **Budgets are tiers** (`low`/`medium`/`high`) that the role author
+2. **Budgets are tiers** (`low`/`medium`/`high`) that the node role author
    defines in concrete terms, with explicit numbers only for what the
    governor can enforce. No memory accounting.
 3. **Priority** is a small named set (`background`, `normal`, `important`,
-   `critical`) the app assigns per role and per task kind. It orders
+   `critical`) the app assigns per node role and per task kind. It orders
    admission and shedding under contention, never preempts, never raises a
    budget, and cannot be set by a remote party. Aging rule left open.
 4. **The yield signal** is a small pressure level the app sets (none,
@@ -446,16 +446,16 @@ Following the project's module-per-dependency-unit rule:
    invitation only if it holds a standing allow-list it set in advance.
    Needs the label type from `18`, so it is blocked on that.
 6. **No silent default budget.** Adoption states a tier or says
-   `budget = default`; a role with no statement fails *that role only*,
+   `budget = default`; a node role with no statement fails *that node role only*,
    loudly, not the node.
-7. **First consumers of the role runtime:** `registry`'s heartbeat and
+7. **First consumers of the node role runtime:** `registry`'s heartbeat and
    lease renewal first (a local duty, no Transit, a real existing gap,
    testable against real Postgres); the `vitals` history retention sweep
    second; executor and director once the job system and Router exist.
-   Build order: governor, scheduler, role runner, then the registry
-   membership role.
+   Build order: governor, scheduler, node role runner, then the registry
+   membership node role.
 8. **Catch-up record:** a small interface in `scheduler` (get and put the
-   last run per role and duty), in-memory by default so nodes with no
+   last run per node role and duty), in-memory by default so nodes with no
    storage get skip semantics; the durable implementation comes with the
    job system rather than a separate table.
 9. **Task identity and dedup:** the job ID plus an attempt number; an
@@ -471,23 +471,26 @@ Following the project's module-per-dependency-unit rule:
     use the database's clock.
 12. **The durable job system is in scope**, under the no-arbitrary-code
     constraint above, and a task kind is separate from an endpoint.
+13. **Terminology: "node role", always qualified.** Bare "role" keeps
+    meaning Gatehouse's permission bundle (`09`, `07`'s HCL section). This
+    follows common practice: Kubernetes lives with both RBAC `Role` and
+    node roles by qualifying, and Elasticsearch, Kafka and Akka all speak
+    of node roles. The cost is vigilance — every type, module and config
+    key for this concept carries the qualifier (the planned module is
+    `noderoles`). `CLAUDE.md` records the rule so it does not drift.
 
 ## Still open
 
 1. **Where node-local adoption config lives, and in what format.** Doc
    `07` assigns flat operational settings, including SDK-init options, to
    TOML, and reserves HCL for "ensure this exists" reference graphs. By
-   that rule the node's own settings (ceiling, tier mapping, adopted roles,
+   that rule the node's own settings (ceiling, tier mapping, adopted node roles,
    priorities) are TOML or code-defined structs, while the store-resident
-   side (grants a role's principal needs, Policy values that configure a
-   role, recurring job definitions) is a natural extension of HCL's
-   existing role. See the note added to `07`.
-2. **Naming collision.** `09` and `07` already use "role" for a Gatehouse
-   permission bundle. This doc's "role" is a different thing — a set of
-   duties a node adopts. Prose should say *node role* where both appear,
-   and the module name `roles` should probably change; undecided.
-3. **The aging rule for priority**, and whether any task kind may be
+   side (grants a node role's principal needs, Policy values that configure a
+   node role, recurring job definitions) is a natural extension of what HCL
+   is already used for. See the note added to `07`.
+2. **The aging rule for priority**, and whether any task kind may be
    marked non-sheddable.
-4. **The job system's own design** — its states, claim and retry rules,
+3. **The job system's own design** — its states, claim and retry rules,
    target selection and authority, and the separate task registry. To be
    written as its own doc.

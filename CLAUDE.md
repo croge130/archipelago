@@ -7,3 +7,12 @@
 3. This is about how replies are written. It does not restrict the format of
    the architecture docs under `docs/architecture/`, which have their own
    conventions.
+
+## Terminology
+
+1. "Role" on its own means Gatehouse's permission bundle (`gatehouse_roles`).
+2. The concept of a set of duties a node adopts is always a "node role",
+   in docs, type names, module names (`noderoles`) and config keys. Never
+   write bare "role" for it.
+3. Within a node role, a "duty" is one unit of automatic work; a "task" is
+   one execution of it, and a "job" is a task made durable by the job system.

@@ -33,13 +33,13 @@ capabilities* when both appear together.
 |---|---|---|
 | Realization capabilities | What can this transport do? | Built, local-only |
 | Protocol version | Can we talk at all? | Not built (`11` defers it) |
-| Roles, labels, capabilities | What does this peer do, and how do I select it? | This doc |
+| Node roles, labels, capabilities | What does this peer do, and how do I select it? | This doc |
 
 ## The archipelago domain
 
 An **archipelago domain** is one deployment: the set of nodes that trust
 the same root(s) and share authority. A node may operate in more than
-one, and **its roles, labels and capabilities are then independent per
+one, and **its node roles, labels and capabilities are then independent per
 domain** — the same process can be an SSO provider in one and a plain
 worker in another, with different endpoints, different grants and
 different signing keys.
@@ -50,7 +50,7 @@ different signing keys.
 for this: it is built from one set of stores, one set of modes and one
 `Config` (including its own `SSOSigner`). A node straddling two domains
 holds **two `App`s**, each over its own stores. Nothing about
-roles/labels/capabilities needs a domain column; the domain *is* which
+node roles/labels/capabilities needs a domain column; the domain *is* which
 `App` you are talking to.
 
 This is deliberate, and it is the project's own earlier lesson applied
@@ -77,19 +77,19 @@ a per-domain filter on the registries (the same shape as `registry`'s
   question (below). The default must be *not* to propagate.
 - **SSO signer, seeding, modes:** already per-`App` in `17`.
 
-## Roles, labels, capabilities — and core vs. app-defined
+## Node roles, labels, capabilities — and core vs. app-defined
 
 Three distinct concepts:
 
 | Concept | Meaning | How a claim is checked |
 |---|---|---|
 | **Capability** | Something the peer can do: an endpoint it serves, a task kind it can execute, a protocol feature. An executable task kind is *not* an endpoint (see `19`). | Call it; failure is the answer. |
-| **Role** | A responsibility it holds. *Exclusive* roles (leader) are exactly the leases `13` already built; *non-exclusive* roles (SSO provider) are declared and imply a capability. | Exclusive: check the lease holder. Non-exclusive: check the implied capability. |
+| **Node role** | A responsibility it holds. *Exclusive* node roles (leader) are exactly the leases `13` already built; *non-exclusive* node roles (SSO provider) are declared and imply a capability. | Exclusive: check the lease holder. Non-exclusive: check the implied capability. |
 | **Label** | Free-form selector metadata (environment, zone). Never authorized on — the same rule `Principal.Metadata` and `Instance.Metadata` already follow. | Not verified. |
 
 **Core vs. app-defined reuses the reserved-namespace mechanism.**
 `gatehouse-core/facade`'s `defaultReservedNamespaces` already lists
-`archipelago` plus one entry per base. A *core* role, label or
+`archipelago` plus one entry per base. A *core* node role, label or
 capability is a key under one of those namespaces; an *app-defined* one is
 anything else. `RegisterPermission` and `RegisterEndpoint` already share
 this map and its explicit override; no second naming mechanism is
@@ -109,9 +109,9 @@ versioned with the protocol. An unknown key in a core namespace from a
 newer peer is ignored, not an error; an unknown app-defined key is just
 data.
 
-A node *adopting* a role, and the resource bounds that keep adopted
-roles from overwhelming it, are designed in
-[`19-roles-and-resource-governance-model.md`](19-roles-and-resource-governance-model.md).
+A node *adopting* a node role, and the resource bounds that keep adopted
+node roles from overwhelming it, are designed in
+[`19-node-roles-and-resource-governance-model.md`](19-node-roles-and-resource-governance-model.md).
 
 *Open:* labels have no type today — only `Instance.Group` and opaque
 `Metadata`. Selection like "peers with `env=prod`" needs a queryable shape,
@@ -161,7 +161,7 @@ record itself; everything else is learned over the connection.
   handshake, and negatives can be cached. An opt-in hint (truncated hashes
   of trusted roots) is possible later for deployments where that noise
   matters; it is not part of the first version.
-- **Roles, labels, capabilities** — core or app-defined. App-defined ones
+- **Node roles, labels, capabilities** — core or app-defined. App-defined ones
   would leak to the LAN and have no bounded size; core ones are
   per-domain, so there is no single set to announce. Both arrive
   post-connection, filtered by the same `filterByGrant` visibility policy

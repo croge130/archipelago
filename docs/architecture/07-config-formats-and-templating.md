@@ -82,7 +82,7 @@ shape of content, consistent with HCL's Go-native rationale above.
 
 ## Node roles and jobs: planned extensions, none built
 
-[`19-roles-and-resource-governance-model.md`](19-roles-and-resource-governance-model.md)
+[`19-node-roles-and-resource-governance-model.md`](19-node-roles-and-resource-governance-model.md)
 adds state that fits these formats, split by the same rule this doc already
 states — match the format to the content's shape:
 
@@ -102,9 +102,10 @@ states — match the format to the content's shape:
    mapping from budget tier to concrete numbers, and each domain's list of
    adopted node roles with their tier and priority. The structs these decode
    into are the source of truth, so code-defined configuration stays valid.
-3. **A terminology warning.** The "roles" in the HCL section above are
-   Gatehouse permission bundles. A *node role* in `19` is a different
-   thing — a set of duties a node performs. Where both appear, say which.
+3. **A terminology rule.** The "roles" in the HCL section above are
+   Gatehouse permission bundles, and bare "role" keeps that meaning. A
+   *node role* in `19` is a different thing — a set of duties a node
+   adopts — and is always written "node role".
 
 ## Where this sits relative to the rest of the design
 
