@@ -364,7 +364,7 @@ registry, separate from `15`'s endpoint registry, and a job is delivered
 by one generic mechanism rather than a route per kind. A handler may
 call an endpoint if its work calls for one, but nothing requires it.
 
-**Direction, not yet a design** (it will get its own doc):
+**Direction** (the design itself is in [`20-jobs-model.md`](20-jobs-model.md)):
 
 1. **A new base, `jobs`**, with the project's usual structure / evaluation /
    storage / facade layers and a Postgres store. A job records its task
@@ -491,6 +491,6 @@ Following the project's module-per-dependency-unit rule:
    is already used for. See the note added to `07`.
 2. **The aging rule for priority**, and whether any task kind may be
    marked non-sheddable.
-3. **The job system's own design** — its states, claim and retry rules,
-   target selection and authority, and the separate task registry. To be
-   written as its own doc.
+3. **The job system's own design** — drafted in
+   [`20-jobs-model.md`](20-jobs-model.md); its open questions are tracked
+   there.
