@@ -8,6 +8,7 @@ import (
 	certstoreDB "github.com/croge130/archipelago/certstore/storage/dbstore"
 	archidb "github.com/croge130/archipelago/db"
 	gatehouseDB "github.com/croge130/archipelago/gatehouse-core/storage/dbstore"
+	jobsDB "github.com/croge130/archipelago/jobs/storage/dbstore"
 	policyDB "github.com/croge130/archipelago/policy/storage/dbstore"
 	"github.com/croge130/archipelago/sdk"
 	vitalsDB "github.com/croge130/archipelago/vitals/storage/dbstore"
@@ -56,6 +57,9 @@ func OpenDB(ctx context.Context, cfg archidb.Config, modes sdk.Modes) (sdk.Store
 		}},
 		{modes.Certs, "certstore", certstoreDB.Migrations, func() {
 			stores.Certs = sdk.CertStores{Reader: certstoreDB.NewPostgresReader(pool.Pgx()), Writer: certstoreDB.NewPostgresWriter(pool.Pgx())}
+		}},
+		{modes.Jobs, "jobs", jobsDB.Migrations, func() {
+			stores.Jobs = sdk.JobsStores{Reader: jobsDB.NewPostgresReader(pool.Pgx()), Writer: jobsDB.NewPostgresWriter(pool.Pgx())}
 		}},
 		{modes.Vitals, "vitals", vitalsDB.Migrations, func() {
 			stores.Vitals = sdk.VitalsStores{Reader: vitalsDB.NewPostgresReader(pool.Pgx()), Writer: vitalsDB.NewPostgresWriter(pool.Pgx())}

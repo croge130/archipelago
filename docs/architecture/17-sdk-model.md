@@ -29,7 +29,7 @@ Postgres-backed, so that wiring looks like:
 4. On every startup, run the idempotent seeding steps:
    `gatehouse/facade.RegisterAssumePermissions`,
    `aliasauth.RegisterPermissions`, `vitalsauth.RegisterPermissions`,
-   `vitals/facade.SeedBuiltinDefinitions`,
+   `jobsauth.RegisterPermissions`, `vitals/facade.SeedBuiltinDefinitions`,
    `vitalsdefaults.EnsurePolicyDefinition`.
 
 Steps 1 and 2 are *the DB-backed way of obtaining stores*, not something
@@ -198,6 +198,7 @@ enables just `Vitals` and gets the narrower set of seeding steps.
 | `Policy` | `Stores.Policy.Reader` | — |
 | `Alias` | `Stores.Alias.Reader` | with `Gatehouse`: `aliasauth.RegisterPermissions` |
 | `Vitals` | `Stores.Vitals.Reader` | `SeedBuiltinDefinitions`; with `Gatehouse`: `vitalsauth.RegisterPermissions`; with `Policy`: `vitalsdefaults.EnsurePolicyDefinition` |
+| `Jobs` | `Stores.Jobs.Reader` | with `Gatehouse`: `jobsauth.RegisterPermissions`. Also enables `App.JobsAuth()`, which assembles `jobsauth.Deps` from the App's own stores (it needs both modes; a node holding only the jobs base uses its facade directly) |
 | `Certs` | `Stores.Certs.Reader` | — |
 | `SSOProvider` | the `Gatehouse` and `Certs` modes, plus `Config.SSOSigner` — the SDK never generates or stores this key itself, matching `12-sso-tickets-model.md`'s "never the mTLS key" rule | — |
 

@@ -9,6 +9,7 @@ import (
 	"github.com/croge130/archipelago/gatehouse-core/evaluation"
 	gatehouseFacade "github.com/croge130/archipelago/gatehouse-core/facade"
 	gatehouseStructure "github.com/croge130/archipelago/gatehouse-core/structure"
+	jobsFacade "github.com/croge130/archipelago/jobs/facade"
 	"github.com/google/uuid"
 )
 
@@ -16,6 +17,7 @@ import (
 // That makes "New and Seed-skip paths perform no storage I/O" a property
 // the tests below prove by merely not panicking.
 type nilGatehouseReader struct{ gatehouseFacade.Reader }
+type nilJobsReader struct{ jobsFacade.Reader }
 
 func gatehouseOnly() Stores {
 	return Stores{Gatehouse: GatehouseStores{Reader: nilGatehouseReader{}}}
@@ -138,5 +140,61 @@ func TestStoreErrorsReachTheCallerInsteadOfBecomingDenials(t *testing.T) {
 	err = evaluation.RequirePermission(context.Background(), app.Gatehouse.Reader, uuid.New(), "anything.read")
 	if !errors.Is(err, sentinel) {
 		t.Fatalf("err = %v, want it to wrap the store's own error", err)
+	}
+}
+
+func TestJobsModeRequiresItsReader(t *testing.T) {
+	_, err := New(gatehouseOnly(), Modes{Gatehouse: true, Jobs: true}, Config{})
+	if !errors.Is(err, ErrMissingStore) || !strings.Contains(err.Error(), "Jobs mode requires Stores.Jobs.Reader") {
+		t.Fatalf("err = %v, want ErrMissingStore naming the Jobs reader", err)
+	}
+}
+
+func TestJobsAuthNeedsBothJobsAndGatehouseModes(t *testing.T) {
+	app, err := New(Stores{Jobs: JobsStores{Reader: nilJobsReader{}}}, Modes{Jobs: true}, Config{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if _, err := app.JobsAuth(); err == nil {
+		t.Error("JobsAuth worked with the Jobs mode but no Gatehouse mode: jobsauth is the integration of both")
+	}
+
+	stores := gatehouseOnly()
+	stores.Jobs = JobsStores{Reader: nilJobsReader{}}
+	both, err := New(stores, Modes{Gatehouse: true, Jobs: true}, Config{})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	deps, err := both.JobsAuth()
+	if err != nil {
+		t.Fatalf("JobsAuth: %v", err)
+	}
+	if deps.GatehouseReader == nil || deps.JobsReader == nil {
+		t.Error("the readers should be passed through")
+	}
+	if deps.GatehouseWriter != nil || deps.JobsWriter != nil {
+		t.Error("absent writers must stay absent, so a read-only node's writes fail clearly")
+	}
+}
+
+func TestSeedAddsTheJobsStepOnlyWhenBothModesAreOn(t *testing.T) {
+	stores := gatehouseOnly()
+	stores.Jobs = JobsStores{Reader: nilJobsReader{}}
+
+	jobsOnly, _ := New(Stores{Jobs: stores.Jobs}, Modes{Jobs: true}, Config{})
+	if report, err := jobsOnly.Seed(context.Background()); err != nil || len(report) != 0 {
+		t.Fatalf("the jobs base alone seeds nothing: %+v err=%v", report, err)
+	}
+	both, _ := New(stores, Modes{Gatehouse: true, Jobs: true}, Config{})
+	report, err := both.Seed(context.Background())
+	if err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	var names []string
+	for _, s := range report {
+		names = append(names, s.Name)
+	}
+	if len(report) != 2 || names[1] != "jobsauth.RegisterPermissions" || report[1].Status != SeedSkipped {
+		t.Fatalf("want the gatehouse step then the jobsauth step, both skipped (no Writer): %v %+v", names, report)
 	}
 }

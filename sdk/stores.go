@@ -4,6 +4,7 @@ import (
 	aliasFacade "github.com/croge130/archipelago/alias/facade"
 	certstoreFacade "github.com/croge130/archipelago/certstore/facade"
 	gatehouseFacade "github.com/croge130/archipelago/gatehouse-core/facade"
+	jobsFacade "github.com/croge130/archipelago/jobs/facade"
 	policyFacade "github.com/croge130/archipelago/policy/facade"
 	vitalsFacade "github.com/croge130/archipelago/vitals/facade"
 )
@@ -34,6 +35,11 @@ type CertStores struct {
 	Writer certstoreFacade.Writer
 }
 
+type JobsStores struct {
+	Reader jobsFacade.Reader
+	Writer jobsFacade.Writer
+}
+
 type VitalsStores struct {
 	Reader vitalsFacade.Reader
 	Writer vitalsFacade.Writer
@@ -47,4 +53,5 @@ type Stores struct {
 	Alias     AliasStores
 	Certs     CertStores
 	Vitals    VitalsStores
+	Jobs      JobsStores
 }

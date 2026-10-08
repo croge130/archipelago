@@ -437,10 +437,18 @@ that a stale executor is refused and its own session revoked while the live
 attempt's is untouched, and that losing the cause edge after submission ends
 the job rather than running it.
 
+**Built (SDK wiring):** `Stores.Jobs` and `Modes.Jobs`; `Seed` registers
+`jobsauth`'s permissions when Jobs and Gatehouse are both on;
+`App.JobsAuth()` assembles `jobsauth.Deps` from the App's own stores; and
+`sdkdb.OpenDB` provisions the jobs schema. A test submits, claims,
+authorizes and completes an owner-mode job through nothing but the SDK's
+stores, then shows a read-only node reading the result while its writes
+fail clearly.
+
 **Not built:** recurring jobs (and so the shared recurrence-math question);
-the executor and director node roles and the pushed-delivery path (both need the Router);
-housekeeping node roles; the SDK `Stores.Jobs` / `Modes.Jobs` wiring; any
-per-owner limit or per-job event trail.
+the executor and director node roles and the pushed-delivery path (both
+need the Router); housekeeping node roles; any per-owner limit or per-job
+event trail.
 
 ## Decisions made here
 

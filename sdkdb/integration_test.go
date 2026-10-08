@@ -14,13 +14,16 @@ import (
 	archidb "github.com/croge130/archipelago/db"
 	gatehouseFacade "github.com/croge130/archipelago/gatehouse-core/facade"
 	gatehouseStructure "github.com/croge130/archipelago/gatehouse-core/structure"
+	jobsFacade "github.com/croge130/archipelago/jobs/facade"
+	jobsStructure "github.com/croge130/archipelago/jobs/structure"
+	"github.com/croge130/archipelago/jobsauth"
 	"github.com/croge130/archipelago/sdk"
 	vitalsStructure "github.com/croge130/archipelago/vitals/structure"
 	"github.com/croge130/archipelago/vitalsauth"
 	"github.com/google/uuid"
 )
 
-var allModes = sdk.Modes{Gatehouse: true, Policy: true, Alias: true, Vitals: true}
+var allModes = sdk.Modes{Gatehouse: true, Policy: true, Alias: true, Vitals: true, Jobs: true}
 
 func openStores(t *testing.T, modes sdk.Modes) (sdk.Stores, *archidb.Pool) {
 	t.Helper()
@@ -39,7 +42,7 @@ func openStores(t *testing.T, modes sdk.Modes) (sdk.Stores, *archidb.Pool) {
 	for _, table := range []string{
 		"gatehouse_grants", "gatehouse_permission_definitions", "gatehouse_principals",
 		"vitals_reading_history", "vitals_current_readings", "vitals_instances", "vitals_definitions",
-		"policy_instances", "policy_definitions",
+		"policy_instances", "policy_definitions", "jobs_jobs", "jobs_task_definitions",
 	} {
 		_, _ = pool.Pgx().Exec(context.Background(), "TRUNCATE "+table+" CASCADE")
 	}
@@ -74,8 +77,8 @@ func TestFullAppSeedsIdempotentlyAndComposesAcrossModules(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Seed #%d: %v (report %+v)", i+1, err, report)
 		}
-		if len(report) != 5 {
-			t.Fatalf("Seed #%d report has %d steps, want 5: %+v", i+1, len(report), report)
+		if len(report) != 6 {
+			t.Fatalf("Seed #%d report has %d steps, want 6: %+v", i+1, len(report), report)
 		}
 		for _, step := range report {
 			if step.Status != sdk.SeedRan {
@@ -134,14 +137,15 @@ func TestReadOnlyAppReadsExistingDataAndSeedsNothing(t *testing.T) {
 	ro.Policy.Writer = nil
 	ro.Alias.Writer = nil
 	ro.Vitals.Writer = nil
+	ro.Jobs.Writer = nil
 	app := newApp(t, ro, allModes)
 
 	report, err := app.Seed(ctx)
 	if err != nil {
 		t.Fatalf("read-only Seed returned error: %v", err)
 	}
-	if len(report) != 5 {
-		t.Fatalf("report has %d steps, want 5: %+v", len(report), report)
+	if len(report) != 6 {
+		t.Fatalf("report has %d steps, want 6: %+v", len(report), report)
 	}
 	for _, step := range report {
 		if step.Status != sdk.SeedSkipped {
@@ -180,5 +184,102 @@ func TestScopedAppWithoutGatehouseSeedsOnlyWhatItCan(t *testing.T) {
 	// And New rejects a mode that needs a base the node doesn't have.
 	if _, err := sdk.New(scoped, sdk.Modes{Vitals: true, Alias: true}, sdk.Config{}); err == nil {
 		t.Fatal("New accepted Alias mode with no Alias store")
+	}
+}
+
+func TestJobsFlowThroughTheSDKsOwnStores(t *testing.T) {
+	stores, _ := openStores(t, allModes)
+	ctx := ctx5(t)
+	app := newApp(t, stores, allModes)
+	if _, err := app.Seed(ctx); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+	deps, err := app.JobsAuth()
+	if err != nil {
+		t.Fatalf("JobsAuth: %v", err)
+	}
+
+	mk := func(key string, typ gatehouseStructure.PrincipalType) gatehouseStructure.Principal {
+		p, err := gatehouseFacade.EnsurePrincipal(ctx, app.Gatehouse.Reader, app.Gatehouse.Writer, key, typ)
+		if err != nil {
+			t.Fatalf("EnsurePrincipal: %v", err)
+		}
+		return p
+	}
+	owner := mk("user.owner", gatehouseStructure.PrincipalTypeUser)
+	runner := mk("runner.one", gatehouseStructure.PrincipalTypeServiceAccount)
+
+	grantOn := func(holder uuid.UUID, key, ctxType, ctxID string) {
+		now := time.Now().Truncate(time.Microsecond)
+		k, ct, ci := key, ctxType, ctxID
+		if err := app.Gatehouse.Writer.CreateGrant(ctx, gatehouseStructure.Grant{
+			GrantID: uuid.New(), SubjectType: gatehouseStructure.GrantSubjectTypePrincipal, SubjectID: holder,
+			TargetType: gatehouseStructure.GrantTargetTypePermission, PermissionKey: &k,
+			Scope: gatehouseStructure.GrantScopeContext, ContextType: &ct, ContextID: &ci,
+			Effect: gatehouseStructure.GrantEffectAllow, Status: gatehouseStructure.GrantStatusActive,
+			Origin: gatehouseStructure.GrantOriginManual, CreatedAt: now, UpdatedAt: now,
+		}); err != nil {
+			t.Fatalf("CreateGrant: %v", err)
+		}
+	}
+
+	if err := gatehouseFacade.RegisterPermission(ctx, app.Gatehouse.Reader, app.Gatehouse.Writer,
+		gatehouseStructure.PermissionDefinition{PermissionKey: "myapp.audit.write", RequiredAuthorityLevel: gatehouseStructure.AuthorityLevelStandard},
+		gatehouseFacade.RegisterPermissionOptions{}); err != nil {
+		t.Fatalf("RegisterPermission: %v", err)
+	}
+	def := jobsStructure.TaskDefinition{
+		TaskKey: "myapp.audit.flush", DefaultQueueKey: "myapp.audit",
+		Scope:      []jobsStructure.ScopeEntry{{PermissionKey: "myapp.audit.write"}},
+		Idempotent: true, DefaultMaxAttempts: 2, DefaultAttemptTimeout: time.Minute, PriorityCap: jobsStructure.PriorityNormal,
+	}
+	if err := jobsFacade.RegisterTaskDefinition(ctx, app.Jobs.Reader, app.Jobs.Writer, def, jobsFacade.RegisterTaskOptions{}); err != nil {
+		t.Fatalf("RegisterTaskDefinition: %v", err)
+	}
+
+	grantOn(owner.PrincipalID, jobsauth.PermissionSubmit, jobsauth.ContextTypeQueue, "myapp.audit")
+	grantOn(runner.PrincipalID, jobsauth.PermissionClaim, jobsauth.ContextTypeQueue, "myapp.audit")
+	grantOn(runner.PrincipalID, gatehouseFacade.PermissionAssumeExecute, gatehouseFacade.ContextTypePrincipal, owner.PrincipalID.String())
+	if _, err := gatehouseFacade.GrantPermission(ctx, app.Gatehouse.Writer, gatehouseStructure.GrantSubjectTypePrincipal, owner.PrincipalID, "myapp.audit.write"); err != nil {
+		t.Fatalf("GrantPermission: %v", err)
+	}
+
+	res, err := jobsauth.Submit(ctx, deps, jobsFacade.SubmitRequest{TaskKey: def.TaskKey, RequestedBy: owner.PrincipalID})
+	if err != nil || !res.Created {
+		t.Fatalf("Submit: %+v err=%v", res, err)
+	}
+	ready, skipped, err := jobsauth.Claim(ctx, deps, jobsauth.ClaimRequest{
+		ExecutorInstanceID: uuid.New(), ExecutorPrincipalID: runner.PrincipalID,
+		TaskKeys: []string{def.TaskKey}, QueueKeys: []string{"myapp.audit"}, Limit: 1, ClaimTTL: time.Minute,
+	})
+	if err != nil || len(skipped) != 0 || len(ready) != 1 {
+		t.Fatalf("Claim: ready=%d skipped=%+v err=%v", len(ready), skipped, err)
+	}
+	cj := ready[0]
+	if cj.EffectivePrincipalID != owner.PrincipalID || cj.SessionID == nil {
+		t.Fatalf("an owner-mode job should run as the owner under an assumed session: %+v", cj)
+	}
+	if err := jobsauth.Authorize(ctx, deps, cj, "myapp.audit.write", "", ""); err != nil {
+		t.Fatalf("Authorize: %v", err)
+	}
+	if ok, err := jobsauth.Complete(ctx, deps, cj, nil); err != nil || !ok {
+		t.Fatalf("Complete: ok=%v err=%v", ok, err)
+	}
+
+	// A read-only node over the same stores can still read the result, and
+	// its writes fail clearly instead of panicking.
+	ro := stores
+	ro.Gatehouse.Writer, ro.Jobs.Writer = nil, nil
+	roApp := newApp(t, ro, allModes)
+	roDeps, err := roApp.JobsAuth()
+	if err != nil {
+		t.Fatalf("JobsAuth (read-only): %v", err)
+	}
+	got, err := jobsauth.GetJob(ctx, roDeps, owner.PrincipalID, res.Job.JobID)
+	if err != nil || got.State != jobsStructure.StateSucceeded {
+		t.Fatalf("read-only GetJob: %+v err=%v, want succeeded", got, err)
+	}
+	if _, err := jobsauth.Cancel(ctx, roDeps, owner.PrincipalID, res.Job.JobID); err == nil {
+		t.Error("Cancel on a read-only node should fail clearly")
 	}
 }

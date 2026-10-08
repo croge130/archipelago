@@ -7,6 +7,7 @@ import (
 
 	"github.com/croge130/archipelago/aliasauth"
 	gatehouseFacade "github.com/croge130/archipelago/gatehouse-core/facade"
+	"github.com/croge130/archipelago/jobsauth"
 	vitalsFacade "github.com/croge130/archipelago/vitals/facade"
 	"github.com/croge130/archipelago/vitalsauth"
 	"github.com/croge130/archipelago/vitalsdefaults"
@@ -85,6 +86,11 @@ func (a *App) Seed(ctx context.Context) (SeedReport, error) {
 	if a.Modes.Vitals && a.Modes.Gatehouse {
 		run("vitalsauth.RegisterPermissions", gatehouseWritable, "no Gatehouse Writer", func() error {
 			return vitalsauth.RegisterPermissions(ctx, a.Gatehouse.Reader, a.Gatehouse.Writer)
+		})
+	}
+	if a.Modes.Jobs && a.Modes.Gatehouse {
+		run("jobsauth.RegisterPermissions", gatehouseWritable, "no Gatehouse Writer", func() error {
+			return jobsauth.RegisterPermissions(ctx, a.Gatehouse.Reader, a.Gatehouse.Writer)
 		})
 	}
 	if a.Modes.Vitals {

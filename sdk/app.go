@@ -59,6 +59,9 @@ func New(stores Stores, modes Modes, cfg Config) (*App, error) {
 	if modes.Vitals {
 		need(stores.Vitals.Reader != nil, "Vitals", "Stores.Vitals.Reader")
 	}
+	if modes.Jobs {
+		need(stores.Jobs.Reader != nil, "Jobs", "Stores.Jobs.Reader")
+	}
 	if modes.Certs {
 		need(stores.Certs.Reader != nil, "Certs", "Stores.Certs.Reader")
 	}
