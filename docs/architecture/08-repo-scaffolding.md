@@ -98,6 +98,8 @@ archipelago/
   certstore/                  # Layer 1 base — own module, same shape
   alias/                      # Layer 1 base — own module, same shape
   vitals/                     # Layer 1 base — own module, same shape
+  jobs/                       # Layer 1 base — own module, same shape; the first slice
+                                 # is built (20-jobs-model.md, "Status")
 
   # Layer 2/3 integrations — each its own module, same shape as a base's
   # (no module-vs-package distinction between the two; see below)

@@ -1,6 +1,7 @@
 # Jobs: durable deferred work
 
-**Status: design draft. Nothing here is built.** It turns the direction
+**Status: the first slice of the `jobs` base is built** — see "Status" near
+the end for exactly what is and is not. The rest is still design. It turns the direction
 sketched in
 [`19-node-roles-and-resource-governance-model.md`](19-node-roles-and-resource-governance-model.md)
 into field shapes, a state machine and boundaries, and lists what is still
@@ -354,6 +355,56 @@ surface would not be.
    neither.
 6. `jobs` is added to the reserved-namespace list when built.
 
+## Status
+
+**Built (the `jobs` base, first slice):**
+
+1. **`structure`** — `TaskDefinition`, `ParamSpec`, `ScopeEntry`, `Job`,
+   `State`, `Priority`, `AuthorityMode`, `BackoffPolicy`, and the
+   request/result types for the Writer's commands.
+2. **`evaluation`** — transition legality, `AfterFailure`, `Delay`
+   (overflow-safe), `NormalizeParams` (canonical form plus hash),
+   `ResolveScope` and `ScopePermits`, and `SameTaskDefinition`.
+3. **`storage/dbstore`** — migrations; reader; and a writer whose every
+   state change is one SQL statement guarded by state and, for anything a
+   claimant does, by the attempt number: `ClaimJobs` (`FOR UPDATE SKIP
+   LOCKED`), `HeartbeatJob`, `CompleteJob`, `FailJob`, `CancelJob`,
+   `ReapJobs`, `PruneFinishedJobs`, `AttachClaimIdentity`. All times come
+   from the database's clock.
+4. **`facade`** — `RegisterTaskDefinition`, `Submit`, `FailAttempt`,
+   `Cancel`.
+
+**What the tests establish** (against real Postgres): many concurrent
+claimers never share a job; a claimant whose claim lapsed and was taken
+over is refused by heartbeat, complete, fail and identity attachment — and
+removing the attempt guard from `CompleteJob` makes that test fail; the
+SQL failure decision agrees with `evaluation.AfterFailure` for every
+combination of retryable, attempt, terminal and cancel-requested; a
+lapsed claim is reclaimed only if the job is retryable, has attempts left
+and has no cancel pending, and is otherwise left for `ReapJobs`; a retried
+job waits out its backoff; idempotent submission returns the same job and
+conflicts on different parameters.
+
+**Behaviors worth knowing:**
+
+1. **A lapsed claim on a job that cannot be retried stays `claimed` until
+   something reaps it.** Claiming reclaims lazily and never runs such a job
+   again, so its terminal state depends on a housekeeping pass (`ReapJobs`)
+   — in the design, a node role. Until then it reads as claimed.
+2. **A failure on a job with a cancel pending ends it `cancelled`,** not
+   retried; a request to stop wins over a retry.
+3. **An idempotency key is unique across all states,** not only non-terminal
+   ones; it frees up when the finished job is pruned.
+4. **Priority orders claiming, but there is no aging yet,** so a steady
+   stream of urgent work can starve `background` jobs.
+
+**Not built:** recurring jobs (and so the shared recurrence-math question);
+the `jobsauth` integration — queue-context permissions, the three authority
+modes, and minting an assumed session at claim; the executor and director
+node roles and the pushed-delivery path (both need the Router);
+housekeeping node roles; the SDK `Stores.Jobs` / `Modes.Jobs` wiring; any
+per-owner limit or per-job event trail.
+
 ## Decisions made here
 
 1. Parameters are a flat list of named typed values; no nested schema.
@@ -387,17 +438,21 @@ surface would not be.
    For calendar expressions a library such as `robfig/cron` is the obvious
    candidate, to be checked against its real behavior before anything is
    chosen.
-4. **Reserved-namespace check.** `jobs` cannot import Gatehouse-core's
-   unexported list. Either `jobs` takes the list as an option, `jobsauth`
-   performs the check, or the list moves somewhere shared.
+4. **Reserved-namespace check — resolved for now.** `jobs` cannot import
+   Gatehouse-core's unexported list, so `facade.RegisterTaskDefinition`
+   takes the list as an option (default `jobs`, `archipelago`) and an
+   integration passes a wider one. Moving the list somewhere shared is
+   still possible later.
 5. **A local outbox for submissions.** A node with conditional store access
    (`17`) might want to buffer submissions while the store is unreachable.
    That is at-least-once from the application's view and raises ordering
    and duplication questions; not designed.
 6. **Target selection beyond a named instance.** By label needs the label
    type from `18`.
-7. **Size limits** for `Params`, `Result` and `LastError`, and how long
-   finished jobs are retained by default.
+7. **Size limits — working defaults chosen:** 64 KiB for `Params` and
+   `Result`, 1024 characters for `LastError`, 128 for keys. They are
+   constants in `structure`, not a protocol. How long finished jobs are
+   retained by default is still open (`PruneFinishedJobs` takes the age).
 8. **Result delivery for streaming tasks** (`19` decided events by default,
    channels only for kinds that declare streaming); how that interacts with
    the stored `Result`.
