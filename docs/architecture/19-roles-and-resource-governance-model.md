@@ -137,6 +137,37 @@ honor (a smaller batch at `low`), not an enforced limit, and nothing in
 the governor tries to measure what a duty holds. Hard memory protection
 remains the operating system's job.
 
+### Priority: "I care about this more"
+
+When resources are genuinely limited, the app can say which role or task
+it cares about more. Priority is a small, named, ordered set rather than a
+number — `background`, `normal`, `important`, `critical` — in the same
+coarse spirit as the budget tiers. The app sets it per adopted role and per
+registered task kind.
+
+1. **Priority only matters under contention.** With room to spare, it does
+   nothing.
+2. **It orders admission.** When capacity frees up and work is waiting, the
+   governor admits the highest priority first.
+3. **It orders shedding.** Under queue overflow or app pressure (the yield
+   signal), the lowest priority is shed or deferred first. Rising pressure
+   raises the cutoff: at *elevated*, `background` goes; at *high*, anything
+   below `important`.
+4. **It does not preempt.** Running work is not killed to make room unless
+   that duty explicitly opted into cancellation.
+5. **It does not buy extra budget.** A `critical` role still runs inside
+   its tier and the node ceiling. Priority orders work inside the budget; it
+   never raises it.
+6. **A remote party cannot set it.** A job may carry a priority hint, but
+   the executor's effective priority is the lower of the hint and the cap
+   the executor has configured for that task kind. A director cannot push
+   work to the front of a node that did not agree to give it that standing —
+   the same consent rule as the budget ceiling.
+7. **Low priority must not starve forever.** Waiting work gains effective
+   priority with age, up to a cap one level below the top, so aged
+   `background` work eventually runs but never displaces `critical`. The
+   exact aging rule is left open.
+
 Real CPU and memory isolation belongs to the operating system (cgroups,
 container limits). The governor is compatible with that and does not
 replace it; this doc does not try to.
@@ -171,11 +202,12 @@ records `actor_principal`, `requested_by_principal` and
 
 ## Exclusive roles use leases
 
-**Roles are not unique unless they say so, and designs should work around
-a role type having several holders wherever possible.** Most roles — an
-executor, a retention sweeper — are safe, and often better, run by many
-nodes at once. Exclusivity is an explicit, opt-in property of a role
-definition, reserved for the cases that genuinely need one holder.
+**Roles are not unique unless they say so, and exclusive roles are
+permitted but discouraged:** prefer a design where several nodes can hold
+the role at once. Most roles — an executor, a retention sweeper — are safe,
+and often better, run by many nodes at once. Exclusivity is an explicit,
+opt-in property of a role definition, for the cases where a single holder
+really is the simplest correct design.
 
 A role that must have exactly one holder per group (a leader) is a
 [`13`](13-registry-and-leases-model.md) lease:
@@ -297,9 +329,17 @@ Design points that follow from earlier docs:
   duplicate execution would matter, the same requirement exclusive roles
   have.
 - **Discovery of executors** is `18`'s: ask a peer what it offers, after
-  the connection. The task kind is an ordinary capability, and "executor
+  the connection. An executable task kind is a capability, and "executor
   of kind K" is a role claim that is verified by the executor accepting
   the task.
+- **A task kind is not an endpoint.** Being able to perform a kind of job
+  does not mean exposing an additional endpoint for it. Task kinds have
+  their own registry, separate from `15`'s `EndpointDefinition`s, with their
+  own authorization (a permission per kind to *submit* one) and their own
+  advertisement as a capability. Directed tasks arrive through one generic
+  delivery mechanism, not a route per kind. A job's handler *may* call an
+  endpoint, or need one to exist, but that is the handler's business; the
+  job itself is a separate thing.
 - **Router dependency.** The executor half needs inbound dispatch, which
   is the same undesigned Router that `11`, `15` and `16` are waiting on.
   So local duties, then the director's *sending* path, can come first;
@@ -318,7 +358,11 @@ a task kind and parameters validated against that kind's `typedvalue`
 schema. It never carries code, a script, or a command line. A job naming a
 kind the node has no handler for is rejected, not interpreted. Registering
 a handler *is* adopting the executor role for that kind, which is also what
-makes "executor of kind K" a capability worth advertising (`18`).
+makes "executor of kind K" a capability worth advertising (`18`). It does
+**not** create an endpoint: a task kind is registered in its own task
+registry, separate from `15`'s endpoint registry, and a job is delivered
+by one generic mechanism rather than a route per kind. A handler may
+call an endpoint if its work calls for one, but nothing requires it.
 
 **Direction, not yet a design** (it will get its own doc):
 
@@ -383,51 +427,67 @@ Following the project's module-per-dependency-unit rule:
 
 ## Decisions so far
 
-1. **Roles are non-unique by default.** Exclusivity is explicit and opt-in,
-   and designs should tolerate several holders wherever possible. Duties
+1. **Roles are non-unique by default**, and exclusive roles are permitted
+   but discouraged in favor of designs that several nodes can hold. Duties
    of an exclusive role must be idempotent; fencing tokens are not
    designed in.
 2. **Budgets are tiers** (`low`/`medium`/`high`) that the role author
    defines in concrete terms, with explicit numbers only for what the
-   governor can enforce. No memory accounting. *(Proposed in review;
-   recorded here as the working position.)*
-3. **First consumers of the role runtime:** `registry`'s heartbeat and
+   governor can enforce. No memory accounting.
+3. **Priority** is a small named set (`background`, `normal`, `important`,
+   `critical`) the app assigns per role and per task kind. It orders
+   admission and shedding under contention, never preempts, never raises a
+   budget, and cannot be set by a remote party. Aging rule left open.
+4. **The yield signal** is a small pressure level the app sets (none,
+   elevated, high). It lowers *admission* only and never kills a running
+   duty unless that duty opted into cancellation. Pressure and priority
+   interact as in the priority section.
+5. **Policy-invited adoption** is ignored by default; a node acts on an
+   invitation only if it holds a standing allow-list it set in advance.
+   Needs the label type from `18`, so it is blocked on that.
+6. **No silent default budget.** Adoption states a tier or says
+   `budget = default`; a role with no statement fails *that role only*,
+   loudly, not the node.
+7. **First consumers of the role runtime:** `registry`'s heartbeat and
    lease renewal first (a local duty, no Transit, a real existing gap,
    testable against real Postgres); the `vitals` history retention sweep
    second; executor and director once the job system and Router exist.
    Build order: governor, scheduler, role runner, then the registry
    membership role.
-4. **Catch-up record:** a small interface in `scheduler` (get and put the
+8. **Catch-up record:** a small interface in `scheduler` (get and put the
    last run per role and duty), in-memory by default so nodes with no
    storage get skip semantics; the durable implementation comes with the
    job system rather than a separate table.
-5. **Deadlines are relative durations from receipt**, not absolute
-   timestamps. The executor computes its own absolute deadline from its
-   own clock. Calendar schedules are evaluated only on the node that owns
-   them and are never shipped as absolute times to others. Job timestamps
-   use the database's clock.
-6. **The durable job system is in scope**, under the no-arbitrary-code
-   constraint above.
+9. **Task identity and dedup:** the job ID plus an attempt number; an
+   executor remembers recent IDs for roughly the task's deadline plus a
+   margin and answers a repeat with the earlier outcome. The job store is
+   the durable memory, and tasks are idempotent regardless.
+10. **Result delivery:** a correlated result event by default; a channel
+    only for task kinds that declare they stream progress.
+11. **Deadlines are relative durations from receipt**, not absolute
+    timestamps. The executor computes its own absolute deadline from its
+    own clock. Calendar schedules are evaluated only on the node that owns
+    them and are never shipped as absolute times to others. Job timestamps
+    use the database's clock.
+12. **The durable job system is in scope**, under the no-arbitrary-code
+    constraint above, and a task kind is separate from an endpoint.
 
 ## Still open
 
-1. **The yield signal** — what the app calls to say it is busy, and
-   whether roles pause or shed. Recommended: a small pressure level the
-   app sets, which lowers *admission* only and never kills a running duty
-   unless that duty opted into cancellation.
-2. **Policy-invited adoption** — a domain asking nodes to adopt a role.
-   Needs the label type from `18`; recommended shape is "ignored unless the
-   node holds a standing allow-list".
-3. **Defaults versus refusing to start** — recommended: no silent default;
-   a role with no stated budget fails *that role only*, loudly.
-4. **Where adoption config lives and how a node enumerates roles across
-   domains** — recommended: code-defined to start, as structs that could
-   later be loaded from a file; observers learn a node's roles by
-   advertisement, not by reading its config.
-5. **Task identity and the dedup window** — recommended: the job ID plus an
-   attempt number, with the executor remembering recent IDs for roughly
-   the task's deadline plus a margin; the job store is the durable memory.
-6. **Result delivery** — recommended: a correlated result event by default;
-   a channel only for task kinds that declare they stream progress.
-7. **The job system's own design** — its states, claim and retry rules,
-   target selection and authority, to be written as its own doc.
+1. **Where node-local adoption config lives, and in what format.** Doc
+   `07` assigns flat operational settings, including SDK-init options, to
+   TOML, and reserves HCL for "ensure this exists" reference graphs. By
+   that rule the node's own settings (ceiling, tier mapping, adopted roles,
+   priorities) are TOML or code-defined structs, while the store-resident
+   side (grants a role's principal needs, Policy values that configure a
+   role, recurring job definitions) is a natural extension of HCL's
+   existing role. See the note added to `07`.
+2. **Naming collision.** `09` and `07` already use "role" for a Gatehouse
+   permission bundle. This doc's "role" is a different thing — a set of
+   duties a node adopts. Prose should say *node role* where both appear,
+   and the module name `roles` should probably change; undecided.
+3. **The aging rule for priority**, and whether any task kind may be
+   marked non-sheddable.
+4. **The job system's own design** — its states, claim and retry rules,
+   target selection and authority, and the separate task registry. To be
+   written as its own doc.

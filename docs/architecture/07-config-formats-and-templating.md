@@ -80,6 +80,32 @@ unlike JSON) and the absence of YAML's implicit type-coercion footguns
 wrong type). TOML is also already the Go ecosystem's own default for this
 shape of content, consistent with HCL's Go-native rationale above.
 
+## Node roles and jobs: planned extensions, none built
+
+[`19-roles-and-resource-governance-model.md`](19-roles-and-resource-governance-model.md)
+adds state that fits these formats, split by the same rule this doc already
+states — match the format to the content's shape:
+
+1. **HCL, "ensure this exists".** The store-resident side of node roles
+   and jobs is the same kind of reference graph as principals, roles,
+   groups and grants: the grants a node role's principal needs, the Policy
+   values that configure a role (budget, schedule), and recurring job
+   definitions, each of which refers to a task kind and a permission.
+   A cross-reference error — a recurring job naming a task kind nobody
+   registered — is exactly the sort of mistake HCL validation catches
+   before anything is applied. These would apply through the same
+   idempotent `Ensure*` path, not a new one.
+2. **TOML, flat operational settings.** What a *node* adopts is not
+   written to any store; it is read at startup, is node-local, and must
+   work on a node with no database at all. That is SDK-init configuration
+   by this doc's own definition: the node-wide resource ceiling, the
+   mapping from budget tier to concrete numbers, and each domain's list of
+   adopted node roles with their tier and priority. The structs these decode
+   into are the source of truth, so code-defined configuration stays valid.
+3. **A terminology warning.** The "roles" in the HCL section above are
+   Gatehouse permission bundles. A *node role* in `19` is a different
+   thing — a set of duties a node performs. Where both appear, say which.
+
 ## Where this sits relative to the rest of the design
 
 None of this introduces a new base or a new dependency in

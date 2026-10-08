@@ -83,7 +83,7 @@ Three distinct concepts:
 
 | Concept | Meaning | How a claim is checked |
 |---|---|---|
-| **Capability** | Something the peer can do: an endpoint it serves, a protocol feature. | Call it; failure is the answer. |
+| **Capability** | Something the peer can do: an endpoint it serves, a task kind it can execute, a protocol feature. An executable task kind is *not* an endpoint (see `19`). | Call it; failure is the answer. |
 | **Role** | A responsibility it holds. *Exclusive* roles (leader) are exactly the leases `13` already built; *non-exclusive* roles (SSO provider) are declared and imply a capability. | Exclusive: check the lease holder. Non-exclusive: check the implied capability. |
 | **Label** | Free-form selector metadata (environment, zone). Never authorized on — the same rule `Principal.Metadata` and `Instance.Metadata` already follow. | Not verified. |
 
