@@ -25,6 +25,7 @@ var defaultReservedNamespaces = map[string]bool{
 	"transit":     true,
 	"alias":       true,
 	"vitals":      true,
+	"jobs":        true,
 }
 
 // RegisterPermissionOptions controls RegisterPermission's defaults.

@@ -41,6 +41,15 @@ var (
 	// returned as themselves so a caller can tell them apart.
 	ErrAssumeNotPermitted = errors.New("facade: assume: not permitted")
 
+	// ErrAssumeCauseDenied and ErrAssumeExecuteDenied say which edge
+	// failed. Both satisfy errors.Is(err, ErrAssumeNotPermitted). The
+	// distinction matters to a caller: a failed cause edge means the job
+	// as submitted is no longer permitted (terminal), while a failed
+	// execute edge only means *this* executor may not run it (another
+	// might).
+	ErrAssumeCauseDenied   = fmt.Errorf("%w: requester may not cause work as that principal", ErrAssumeNotPermitted)
+	ErrAssumeExecuteDenied = fmt.Errorf("%w: creator may not execute as that principal", ErrAssumeNotPermitted)
+
 	ErrSessionNotFound   = errors.New("facade: session not found")
 	ErrNotAssumedSession = errors.New("facade: session is not an assumed session")
 	ErrSessionRevoked    = errors.New("facade: session is revoked")
@@ -201,15 +210,42 @@ func requirePrincipalExists(ctx context.Context, reader Reader, id uuid.UUID) er
 // would be circular. A denial wraps ErrAssumeNotPermitted; a store error
 // is returned as itself.
 func requireAssumeEdges(ctx context.Context, reader Reader, creator, requester, as uuid.UUID) error {
-	if requester != as {
-		if err := requireEdge(ctx, reader, requester, PermissionAssumeCause, as); err != nil {
-			return fmt.Errorf("requester may not cause work as that principal: %w", err)
-		}
+	if err := RequireCanCauseAs(ctx, reader, requester, as); err != nil {
+		return err
 	}
-	if creator != as {
-		if err := requireEdge(ctx, reader, creator, PermissionAssumeExecute, as); err != nil {
-			return fmt.Errorf("creator may not execute as that principal: %w", err)
+	return RequireCanExecuteAs(ctx, reader, creator, as)
+}
+
+// RequireCanCauseAs checks the requester's edge alone: may requester
+// cause work to run as as? Implicit when they are the same principal.
+// It exists so an integration can check the edge at submission, before
+// any session is created. A denial wraps ErrAssumeCauseDenied; a store
+// failure is returned as itself.
+func RequireCanCauseAs(ctx context.Context, reader Reader, requester, as uuid.UUID) error {
+	if requester == as {
+		return nil
+	}
+	if err := requireEdge(ctx, reader, requester, PermissionAssumeCause, as); err != nil {
+		if errors.Is(err, ErrAssumeNotPermitted) {
+			return fmt.Errorf("%w (%v)", ErrAssumeCauseDenied, err)
 		}
+		return err
+	}
+	return nil
+}
+
+// RequireCanExecuteAs checks the creator's edge alone: may creator
+// execute as as? Implicit when they are the same principal. A denial
+// wraps ErrAssumeExecuteDenied; a store failure is returned as itself.
+func RequireCanExecuteAs(ctx context.Context, reader Reader, creator, as uuid.UUID) error {
+	if creator == as {
+		return nil
+	}
+	if err := requireEdge(ctx, reader, creator, PermissionAssumeExecute, as); err != nil {
+		if errors.Is(err, ErrAssumeNotPermitted) {
+			return fmt.Errorf("%w (%v)", ErrAssumeExecuteDenied, err)
+		}
+		return err
 	}
 	return nil
 }

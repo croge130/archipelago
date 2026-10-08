@@ -111,6 +111,7 @@ archipelago/
   sso/                        # gatehouse-core + certstore + Transit
   registry/                   # gatehouse-core (Instance/Lease) + peerauth
   vitalsauth/                 # vitals + gatehouse-core
+  jobsauth/                   # jobs + gatehouse-core
   vitalsdefaults/             # vitals + policy
   traceagg/                   # Transit + wire + logging (not registry
                                  # directly — see 16-trace-log-aggregation-

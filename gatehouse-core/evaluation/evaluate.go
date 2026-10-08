@@ -2,6 +2,7 @@ package evaluation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/croge130/archipelago/gatehouse-core/structure"
@@ -82,6 +83,11 @@ func Evaluate(ctx context.Context, store Store, req Request) (Decision, error) {
 	return Decision{Allowed: true, MatchedGrantID: &id}, nil
 }
 
+// ErrDenied is wrapped by Require when the evaluator says no, so a caller
+// can tell a denial from a store failure with errors.Is. The message is
+// unchanged: "evaluation: denied: <reason>".
+var ErrDenied = errors.New("evaluation: denied")
+
 // Require is Evaluate plus "return an error if not allowed" — a
 // convenience wrapper, never a second evaluator, same as any other
 // facade in this design.
@@ -91,7 +97,7 @@ func Require(ctx context.Context, store Store, req Request) error {
 		return err
 	}
 	if !decision.Allowed {
-		return fmt.Errorf("evaluation: denied: %s", decision.Reason)
+		return fmt.Errorf("%w: %s", ErrDenied, decision.Reason)
 	}
 	return nil
 }

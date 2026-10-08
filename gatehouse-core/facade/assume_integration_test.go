@@ -331,3 +331,29 @@ func TestAssumeSessionStoreErrorsAreNotDenials(t *testing.T) {
 		t.Fatal("a store failure was reported as a denial")
 	}
 }
+
+func TestEdgeDenialsSayWhichEdgeFailed(t *testing.T) {
+	f := newAssumeFixture(t)
+	ctx := context.Background()
+
+	err := RequireCanCauseAs(ctx, f.reader, f.b.PrincipalID, f.c.PrincipalID)
+	if !errors.Is(err, ErrAssumeCauseDenied) || !errors.Is(err, ErrAssumeNotPermitted) || errors.Is(err, ErrAssumeExecuteDenied) {
+		t.Fatalf("cause edge: err = %v, want ErrAssumeCauseDenied (and ErrAssumeNotPermitted), not the execute error", err)
+	}
+	err = RequireCanExecuteAs(ctx, f.reader, f.a.PrincipalID, f.c.PrincipalID)
+	if !errors.Is(err, ErrAssumeExecuteDenied) || !errors.Is(err, ErrAssumeNotPermitted) || errors.Is(err, ErrAssumeCauseDenied) {
+		t.Fatalf("execute edge: err = %v, want ErrAssumeExecuteDenied (and ErrAssumeNotPermitted), not the cause error", err)
+	}
+	// Circular edges are implicit.
+	if err := RequireCanCauseAs(ctx, f.reader, f.b.PrincipalID, f.b.PrincipalID); err != nil {
+		t.Errorf("a principal causing work as itself: %v", err)
+	}
+	if err := RequireCanExecuteAs(ctx, f.reader, f.a.PrincipalID, f.a.PrincipalID); err != nil {
+		t.Errorf("a principal executing as itself: %v", err)
+	}
+	// AssumeSession reports the failing edge too.
+	f.allowCause(t, f.b.PrincipalID, f.c.PrincipalID)
+	if _, err := AssumeSession(ctx, f.reader, f.writer, f.req(time.Minute)); !errors.Is(err, ErrAssumeExecuteDenied) {
+		t.Errorf("AssumeSession with only the cause edge: err = %v, want ErrAssumeExecuteDenied", err)
+	}
+}

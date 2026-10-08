@@ -2,6 +2,7 @@ package evaluation
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/croge130/archipelago/gatehouse-core/structure"
@@ -46,4 +47,34 @@ func TestRequireContextPermissionAllowed(t *testing.T) {
 	if err := RequireContextPermission(context.Background(), store, principal, "myapp.readinglist.read", "myapp.readinglist", "42"); err != nil {
 		t.Fatalf("expected RequireContextPermission to allow, got: %v", err)
 	}
+}
+
+func TestRequireDenialWrapsErrDeniedAndStoreFailureDoesNot(t *testing.T) {
+	store := newMemStore()
+	principal := uuid.New()
+	store.addPermission(standardPermission("myapp.readinglist.read"))
+
+	denied := RequirePermission(context.Background(), store, principal, "myapp.readinglist.read")
+	if !errors.Is(denied, ErrDenied) {
+		t.Fatalf("a denial should wrap ErrDenied, got: %v", denied)
+	}
+
+	sentinel := errors.New("backend unreachable")
+	failed := RequirePermission(context.Background(), failingStore{Store: store, err: sentinel}, principal, "myapp.readinglist.read")
+	if errors.Is(failed, ErrDenied) {
+		t.Fatal("a store failure was reported as a denial")
+	}
+	if !errors.Is(failed, sentinel) {
+		t.Fatalf("a store failure should reach the caller, got: %v", failed)
+	}
+}
+
+// failingStore fails the first read Evaluate makes.
+type failingStore struct {
+	Store
+	err error
+}
+
+func (s failingStore) GetPermissionDefinition(context.Context, string) (structure.PermissionDefinition, bool, error) {
+	return structure.PermissionDefinition{}, false, s.err
 }

@@ -58,6 +58,15 @@ type FailResult struct {
 	State   State
 }
 
+// ReleaseResult reports what handing a claim back did.
+type ReleaseResult struct {
+	// Applied is false when the claim was no longer this attempt's.
+	Applied bool
+	// State is pending (the normal case) or cancelled, if someone asked
+	// for cancellation while it was claimed.
+	State State
+}
+
 // CancelResult reports what a cancel request did.
 type CancelResult struct {
 	// Applied is false when the job was not cancellable: unknown, or

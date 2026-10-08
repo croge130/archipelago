@@ -371,8 +371,14 @@ expiry are required; authority is `standard` only, which is how
 "`recovery_access` is never assumable" is made true (an elevated session
 is refused too); and no `credential_id` — nothing authenticates *as* an
 assumed session, which is what keeps it from becoming ambient authority.
-A denial is `ErrAssumeNotPermitted`; a store failure is returned as
-itself, never as a denial. Expiry is judged against the calling node's
+A denial is `ErrAssumeNotPermitted`, refined to `ErrAssumeCauseDenied` or
+`ErrAssumeExecuteDenied` so a caller can tell which edge failed — the
+difference matters, since a failed cause edge means the work as submitted
+is no longer permitted while a failed execute edge only means *this*
+executor may not run it. `RequireCanCauseAs` and `RequireCanExecuteAs`
+check one edge alone, for an integration that must check at submission
+before any session exists. A store failure is returned as itself, never as
+a denial; `evaluation.ErrDenied` plays the same role for the evaluator. Expiry is judged against the calling node's
 clock, the same single-clock caveat the lease code has.
 
 **Scope is not a field of the session.** The thing that wants the

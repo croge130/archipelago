@@ -276,6 +276,38 @@ func (w *PostgresWriter) FailJob(ctx context.Context, req structure.FailRequest)
 	return structure.FailResult{Applied: true, State: structure.State(state)}, nil
 }
 
+// ReleaseJob hands a claim back without counting it as an attempt. It is
+// for a claimant that took a job but turns out not to be the one to run
+// it — for instance an executor that holds the queue's claim permission
+// but is not permitted to execute as the job's principal. The job returns
+// to pending with its attempt number restored, so the job's retries are
+// not spent on a mismatch that says nothing about the work, and
+// retryAfter keeps the same executor from immediately taking it again so
+// that one who can run it gets the chance. If a cancel was requested in
+// the meantime, the job is cancelled instead. Like every claimant
+// operation it is refused unless (jobID, attempt) is the live claim.
+func (w *PostgresWriter) ReleaseJob(ctx context.Context, jobID uuid.UUID, attempt int, retryAfter time.Duration) (structure.ReleaseResult, error) {
+	var state string
+	err := w.pool.QueryRow(ctx,
+		`UPDATE jobs_jobs SET
+			state = CASE WHEN cancel_requested THEN 'cancelled' ELSE 'pending' END,
+			attempt = attempt - 1,
+			run_at = CASE WHEN cancel_requested THEN run_at ELSE now() + ($3::bigint `+msInterval+`) END,
+			claimed_by = NULL, claimed_until = NULL, assumed_session_id = NULL, actor_principal_id = NULL,
+			finished_at = CASE WHEN cancel_requested THEN now() ELSE NULL END,
+			updated_at = now()
+		 WHERE job_id = $1 AND state = 'claimed' AND attempt = $2
+		 RETURNING state`,
+		uuidToText(jobID), attempt, durationMS(retryAfter)).Scan(&state)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return structure.ReleaseResult{}, nil
+		}
+		return structure.ReleaseResult{}, fmt.Errorf("dbstore: release job: %w", err)
+	}
+	return structure.ReleaseResult{Applied: true, State: structure.State(state)}, nil
+}
+
 // CancelJob cancels a pending job outright, or flags a claimed one so
 // its executor learns on its next heartbeat. A terminal or unknown job
 // is not applied. Lighthouse's rule carries over: cancellation is

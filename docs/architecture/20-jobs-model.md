@@ -1,6 +1,6 @@
 # Jobs: durable deferred work
 
-**Status: the first slice of the `jobs` base is built** — see "Status" near
+**Status: the `jobs` base (first slice) and the `jobsauth` integration are built** — see "Status" near
 the end for exactly what is and is not. The rest is still design. It turns the direction
 sketched in
 [`19-node-roles-and-resource-governance-model.md`](19-node-roles-and-resource-governance-model.md)
@@ -256,8 +256,10 @@ source. `AuthorityMode` selects among the cases that matter:
    may cause work as C, and the claimant may execute as C — checked at
    submission and again at claim.
 4. **At claim, `jobsauth` calls `AssumeSession`** with A as creator, B as
-   requester and C as principal, expiring with the claim, bound to
-   `(job, attempt)`. The handler's execution context carries that session
+   requester and C as principal, bounded by the job's attempt timeout (an
+   attempt cannot legitimately run longer, and an assumed session's expiry is
+   fixed, so it cannot track a heartbeat-extended claim), and bound to
+   `(job, attempt)` through its metadata. The handler's execution context carries that session
    and the scope. It is never given A's own identity for that job.
 5. **Ownership.** B can read and cancel their own jobs without queue-wide
    grants, so a lower-level principal stays in control of what it
@@ -398,10 +400,45 @@ conflicts on different parameters.
 4. **Priority orders claiming, but there is no aging yet,** so a steady
    stream of urgent work can starve `background` jobs.
 
+**Built (`jobsauth`):**
+
+1. **Queue-context permissions** — `jobs.submit`, `jobs.read`, `jobs.claim`,
+   `jobs.cancel` on the context type `jobs.queue`; the owner can always read
+   and cancel their own jobs. `jobs` joined Gatehouse-core's reserved
+   namespaces.
+2. **`Submit`** checks the submit permission on the queue and, for assumed
+   authority, that the requester may cause work as C.
+3. **`Claim`** requires an explicit list of queues and `jobs.claim` on each,
+   claims, and prepares each job's identity: an assumed session when the
+   effective principal is not the executor, recorded on the job. A job it
+   cannot prepare is dealt with, not left claimed. If the *executor* may not
+   execute as the effective principal, the claim is released without
+   spending an attempt, after a delay, so another executor can take it (new
+   `ReleaseJob` command). If the *requester* may no longer cause the work,
+   the effective principal is gone, or the scope cannot be resolved, the job
+   ends dead.
+4. **`Authorize`** is the one check a handler makes: the operation must be
+   inside the task kind's declared scope for this job, and permitted to the
+   effective principal right now. A scope or permission denial wraps
+   `ErrAuthorityDenied`; a revoked or expired session and store failures are
+   returned as themselves.
+5. **`Complete`, `Fail`, `Abandon`** each revoke the session, including when
+   the operation is refused because the claim was lost. `Fail` treats a cause
+   wrapping `ErrAuthorityDenied` as terminal.
+6. **`GetJob`, `ListJobs`, `Cancel`** with the owner's implicit rights.
+   `ListJobs` applies the caller's limit before filtering, so it may return
+   fewer jobs than the limit.
+
+**Tested** against real Postgres, including that an owner-mode job is
+evaluated as the owner and not the executor (making the executor the
+effective principal fails three tests), that a permission only the executor
+holds is refused, that a declared but wrong-tenant context is out of scope,
+that a stale executor is refused and its own session revoked while the live
+attempt's is untouched, and that losing the cause edge after submission ends
+the job rather than running it.
+
 **Not built:** recurring jobs (and so the shared recurrence-math question);
-the `jobsauth` integration — queue-context permissions, the three authority
-modes, and minting an assumed session at claim; the executor and director
-node roles and the pushed-delivery path (both need the Router);
+the executor and director node roles and the pushed-delivery path (both need the Router);
 housekeeping node roles; the SDK `Stores.Jobs` / `Modes.Jobs` wiring; any
 per-owner limit or per-job event trail.
 

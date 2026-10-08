@@ -31,6 +31,7 @@ type Writer interface {
 	HeartbeatJob(ctx context.Context, jobID uuid.UUID, attempt int, extendBy time.Duration) (structure.HeartbeatResult, error)
 	CompleteJob(ctx context.Context, jobID uuid.UUID, attempt int, result json.RawMessage) (bool, error)
 	FailJob(ctx context.Context, req structure.FailRequest) (structure.FailResult, error)
+	ReleaseJob(ctx context.Context, jobID uuid.UUID, attempt int, retryAfter time.Duration) (structure.ReleaseResult, error)
 	CancelJob(ctx context.Context, jobID uuid.UUID) (structure.CancelResult, error)
 	ReapJobs(ctx context.Context) (structure.ReapResult, error)
 	PruneFinishedJobs(ctx context.Context, olderThan time.Duration) (int64, error)

@@ -606,3 +606,55 @@ func TestAttachClaimIdentityAndListAndCount(t *testing.T) {
 		t.Errorf("CountJobsByState = %v err=%v, want one claimed job", counts, err)
 	}
 }
+
+func TestReleaseJobGivesBackTheClaimWithoutSpendingAnAttempt(t *testing.T) {
+	f := setup(t)
+	f.def(t, "t.a", true)
+	j := f.enqueue(t, "t.a", 0, 0)
+	claimed, _ := f.w.ClaimJobs(ctxT(t), claimReq("t.a"))
+	if len(claimed) != 1 || claimed[0].Attempt != 1 {
+		t.Fatalf("setup claim: %+v", claimed)
+	}
+	sid := uuid.New()
+	_, _ = f.w.AttachClaimIdentity(ctxT(t), j.JobID, 1, &sid)
+
+	// A stale attempt number is refused.
+	if res, err := f.w.ReleaseJob(ctxT(t), j.JobID, 7, time.Second); err != nil || res.Applied {
+		t.Fatalf("stale release: %+v err=%v, want refused", res, err)
+	}
+	res, err := f.w.ReleaseJob(ctxT(t), j.JobID, 1, time.Hour)
+	if err != nil || !res.Applied || res.State != structure.StatePending {
+		t.Fatalf("release: %+v err=%v", res, err)
+	}
+	got := f.get(t, j.JobID)
+	if got.Attempt != 0 || got.State != structure.StatePending || got.ClaimedBy != nil || got.AssumedSessionID != nil || got.ActorPrincipalID != nil {
+		t.Errorf("a released job should be back to attempt 0, unclaimed, with no identity: %+v", got)
+	}
+	if !got.RunAt.After(got.UpdatedAt.Add(30 * time.Minute)) {
+		t.Errorf("the release delay was not applied: run_at %v", got.RunAt)
+	}
+	if again, _ := f.w.ClaimJobs(ctxT(t), claimReq("t.a")); len(again) != 0 {
+		t.Error("a released job was claimable again before its delay")
+	}
+	// Releasing something that is not claimed does nothing.
+	if res, _ := f.w.ReleaseJob(ctxT(t), j.JobID, 0, time.Second); res.Applied {
+		t.Error("released a job that was not claimed")
+	}
+}
+
+func TestReleaseJobHonorsAPendingCancel(t *testing.T) {
+	f := setup(t)
+	f.def(t, "t.a", true)
+	j := f.enqueue(t, "t.a", 0, 0)
+	claimed, _ := f.w.ClaimJobs(ctxT(t), claimReq("t.a"))
+	if _, err := f.w.CancelJob(ctxT(t), j.JobID); err != nil {
+		t.Fatalf("CancelJob: %v", err)
+	}
+	res, err := f.w.ReleaseJob(ctxT(t), j.JobID, claimed[0].Attempt, time.Second)
+	if err != nil || !res.Applied || res.State != structure.StateCancelled {
+		t.Fatalf("release with a cancel pending: %+v err=%v, want cancelled", res, err)
+	}
+	if f.get(t, j.JobID).FinishedAt == nil {
+		t.Error("a cancelled job should have FinishedAt set")
+	}
+}
