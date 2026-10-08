@@ -281,10 +281,12 @@ SessionRecord
                         absent for a service-mediated record that's
                         authoritative but never itself bearer-usable
 - session_kind          ui | cli | agent | service | automation | asserted
+                        | assumed  (designed, not yet built — see below)
 - authority_level       standard | elevated | recovery_access
 - authentication_method
 - asserted_by_principal_id?   set when this session's proof came from
                               somewhere other than local credentials
+- requested_by_principal_id?  (assumed sessions only — not yet built)
 - metadata               opaque, never authorized on
 - created_at / expires_at? / last_seen / revoked_at?
 ```
@@ -312,6 +314,64 @@ never uses Transit gets ordinary sessions with nothing missing; one that
 does gets the integration adding a connection reference on top, without
 the base record ever needing to change for it — the structure/
 evaluation/storage split doing exactly what it's for.
+
+## Assumed sessions — confirmed design, not yet built
+
+*Arose from designing the job system (`20-jobs-model.md`); the shape is
+decided, the code does not exist.*
+
+Some work runs on a different node from the one that asked for it, under
+the authority of a third principal. Four facts are involved, and
+collapsing any two loses something:
+
+```text
+actor_principal       A  who performed the work (the runner)
+requested_by          B  who asked for it
+effective_principal   C  whose permissions the work's operations are
+                         evaluated against
+authority_source         the relationship that justifies this A/B/C
+```
+
+The common cases collapse: a user's own job has C equal to B; ordinary
+service work has C equal to A. Only when C is a third principal does it
+need the machinery below.
+
+**An assumed session is a `Session` with `session_kind = assumed`.**
+`principal_id` is C, `asserted_by_principal_id` is A (the creator, who runs
+the work), and a new nullable `requested_by_principal_id` holds B. An
+assumed session **must carry `expires_at`**, since it is time-bounded by
+definition, and it can be revoked like any session. This extends
+`Session` rather than adding a parallel object, so expiry, revocation and
+audit are not reimplemented. (It is deliberately not called an "execution
+context": that collides with this doc's `Context`, the scope grants attach
+to, and with Go's `context.Context`.)
+
+**Creating one is a permission-checked act with two consent edges.** The
+closest precedents are AWS `PassRole` plus a role's trust policy,
+Kubernetes impersonation, and `sudo -u`:
+
+1. *The requester may cause work to run as C.* An explicit grant scoped to
+   C — the escalation control. Implicit when C is B.
+2. *The creator may execute as C.* A grant from C's side to A. Implicit
+   when C is A.
+
+Both are checked when the session is created and again as the work runs,
+because grants get revoked. Permission and context names are provisional.
+`recovery_access` is never assumable.
+
+**Scope is not a field of the session.** The thing that wants the
+authority (a job's task kind, for instance) declares the permissions it
+may exercise, and the execution layer requires both that an operation be
+evaluated against C and that it fall within that declaration. Core
+evaluation does not change.
+
+**Where this does and does not apply.** The "assertion narrows, never
+expands" rule below belongs to the SSO-style `asserted` kind. An assumed
+session is authorized by the two explicit grants instead, so it can
+legitimately give a purpose-built principal rights its requester lacks.
+Like everything in this doc, how strongly it is enforced depends on
+topology: with direct database access it is discipline and audit; behind
+an indirect store it is a real boundary.
 
 ## Context
 
@@ -607,11 +667,15 @@ authority_source         the artifact/session/delegation/internal
                          authority justifying it
 ```
 
+(A fourth fact, the *effective principal* whose permissions apply, is
+the same as the requester or the actor in every case except
+`assumed_authority`; see "Assumed sessions" above.)
+
 All three are ordinary principal IDs or typed source references — even
 a fully internal, code-defined operation runs as a real principal with a
 stable ID, never a bare string.
 
-### Authority source vocabulary, trimmed from Lighthouse's nine to six
+### Authority source vocabulary, trimmed from Lighthouse's nine to six (plus one added since)
 
 1. `session` — the ordinary case; actor == requester.
 2. `internal_system` — direct DB write, no other party asked. This *is*
@@ -635,6 +699,10 @@ stable ID, never a bare string.
 6. `recovery_elevation` — matches the already-reserved `recovery_access`
    vocabulary; never an ordinary delegation source, never delegable to
    scheduled work.
+7. `assumed_authority` — added after the six above were fixed: work
+   running as a third principal C under an assumed session (see that
+   section). Effective authority is C's current permissions intersected
+   with the scope the work declares.
 
 Dropped rather than carried forward: Lighthouse's `credential` and
 `live_creator_authority` aren't justified by anything decided yet.
@@ -671,7 +739,9 @@ treat as a special case.
 
 ### Audit shape
 
-Delegated/background work logs all three identities plus the outcome —
+Delegated/background work logs all three identities, the effective
+principal (when it differs from the requester and the actor), plus the
+outcome —
 `actor_principal_id`, `requested_by_principal_id`,
 `authority_source_type` (+ a reference id where one applies), the
 permission/scope/context checked, and the decision — loosely adapted

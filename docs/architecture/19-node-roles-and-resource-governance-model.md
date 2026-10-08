@@ -309,8 +309,8 @@ Design points that follow from earlier docs:
   already says it: "the moment an operation needs to ask another node to
   act, that request is the checked boundary (ordinary Peer
   authorization)." The executor authorizes the director's principal
-  against a per-kind permission with the existing `peerauth.Require`; no
-  new authorization concept.
+  against the queue-context permissions from `20` with the existing
+  `peerauth.Require`; no new authorization concept.
 - **The executor consents.** Which kinds it executes is its own adoption;
   its governor can reject on budget. A director is never able to force
   work onto a node. "Rejected" is a normal, expected reply the director
@@ -335,7 +335,7 @@ Design points that follow from earlier docs:
 - **A task kind is not an endpoint.** Being able to perform a kind of job
   does not mean exposing an additional endpoint for it. Task kinds have
   their own registry, separate from `15`'s `EndpointDefinition`s, with their
-  own authorization (a permission per kind to *submit* one) and their own
+  own authorization (queue-context permissions, per `20`) and their own
   advertisement as a capability. Directed tasks arrive through one generic
   delivery mechanism, not a route per kind. A job's handler *may* call an
   endpoint, or need one to exist, but that is the handler's business; the
@@ -391,9 +391,11 @@ call an endpoint if its work calls for one, but nothing requires it.
    scheduler's catch-up record ("last run") is just the last instance that
    definition produced. This is why the catch-up question does not need its
    own table.
-6. **Authority at submission:** who may submit a job of kind K is a
-   permission per kind, checked by an integration (`jobs` + Gatehouse-core),
-   the same shape as `vitalsauth`.
+6. **Authority:** who may submit, claim, read and cancel is decided by
+   generic permissions on a queue context, checked by an integration
+   (`jobs` + Gatehouse-core), the same shape as `vitalsauth`. Whose
+   authority the work runs under (actor, requester, effective principal)
+   is worked out in `20`.
 
 **A side finding that bears on this.** `13`'s `AcquireOrRenewLease` stamps
 `acquired_at` and `expires_at` from the *calling* instance's clock, and the
@@ -420,7 +422,7 @@ Following the project's module-per-dependency-unit rule:
   Gatehouse-core (principal and permission checks), `noderoles` +
   registry/leases (exclusivity), `noderoles` + Vitals (report duty health and
   clamps), `noderoles` + `jobs` (executors claiming work), `jobs` +
-  Gatehouse-core (submission permission per kind), and `noderoles` + Transit
+  Gatehouse-core (queue-context permissions and assumed sessions), and `noderoles` + Transit
   (executor receiving and director sending, once a Router exists).
 - **`sdk`**: `Config` gains a *shared* `Governor` handed to every `App` on
   the node, and a list of adopted node roles per `App`.

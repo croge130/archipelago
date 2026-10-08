@@ -33,8 +33,9 @@ Like permissions (a registered definition, enforced by code), a task kind
 exists at two levels:
 
 1. **`TaskDefinition`** — a record in the domain's jobs store: the kind's
-   key, a description, its parameter schema, the permission needed to
-   *submit* one, and default retry, timeout and priority-cap settings.
+   key, a description, its parameter schema, the **scope** it may
+   exercise (below), a default queue, whether it is idempotent, and default
+   retry, timeout and priority-cap settings.
    Submitters need this to validate parameters before enqueueing, even when
    they cannot run the kind themselves.
 2. **The handler** — code on an executor node, registered at startup.
@@ -46,11 +47,19 @@ type TaskDefinition struct {
     TaskKey               string       // dotted key, e.g. "myapp.report.render"; reserved namespaces as elsewhere
     Description           string
     Params                []ParamSpec  // see below
-    RequiredPermissionKey string       // permission needed to submit; "" = none
-    DefaultMaxAttempts    int
+    DefaultQueueKey       string       // the queue context jobs of this kind go to unless the submitter names one
+    Scope                 []ScopeEntry // the permissions (and context templates) the handler may exercise; see "Whose authority"
+    Idempotent            bool         // true = safe to run more than once; the ONLY way automatic retry is enabled
+    DefaultMaxAttempts    int          // ignored (treated as 1) unless Idempotent
     DefaultAttemptTimeout time.Duration
     PriorityCap           Priority     // the most urgent a submitter may ask for
     Metadata              json.RawMessage // opaque, never authorized on
+}
+
+type ScopeEntry struct {
+    PermissionKey string
+    ContextType   string // optional; with ContextIDParam, scopes the permission to a context named by a parameter
+    ContextIDParam string
 }
 
 type ParamSpec struct {
@@ -74,7 +83,9 @@ expectation) validate; neither trusts the other.
 type Job struct {
     JobID               uuid.UUID
     TaskKey             string
+    QueueKey            string          // the authorization scope (a context ID); see "Whose authority"
     Params              json.RawMessage // validated against the TaskDefinition
+    ParamsHash          string          // fixed at submission; binds the authority to these exact parameters
     State               State
     Priority            Priority        // a hint; the executor applies its own cap (19)
     TargetInstanceID    *uuid.UUID      // optional: a specific node; nil = any executor of the kind
@@ -87,9 +98,12 @@ type Job struct {
     ClaimedBy           *uuid.UUID      // an executor Instance
     ClaimedUntil        *time.Time
     Backoff             BackoffPolicy
-    RequestedBy         *uuid.UUID      // principal who submitted
-    AuthoritySource     AuthoritySource // type + optional reference, per 09
-    OnBehalfOf          *uuid.UUID      // only for delegated_authority
+    RequestedBy         uuid.UUID       // B: the principal who submitted, and the job's owner
+    AuthorityMode       AuthorityMode   // owner | service | assumed
+    RunAs               *uuid.UUID      // C: set only for AuthorityMode = assumed
+    ActorPrincipalID    *uuid.UUID      // A: the executor's principal, recorded at claim
+    AssumedSessionID    *uuid.UUID      // the assumed session minted for the current claim, if any
+    AuthoritySourceRef  string          // optional reference, e.g. the schedule, per 09
     TraceContext        *logging.SpanContext
     ScheduleID          *uuid.UUID      // set if materialized from a recurring definition
     ScheduledSlot       *time.Time      // which slot of that schedule
@@ -115,8 +129,8 @@ stateDiagram-v2
     [*] --> pending: enqueue
     pending --> claimed: claim (attempt+1)
     claimed --> succeeded: complete
-    claimed --> pending: fail or claim expired,<br/>attempts remain (after backoff)
-    claimed --> dead: fail or claim expired,<br/>attempts exhausted
+    claimed --> pending: fail or claim expired, kind is idempotent,<br/>attempts remain (after backoff)
+    claimed --> dead: fail or claim expired and not idempotent,<br/>or attempts exhausted,<br/>or authority denied (never retried)
     pending --> dead: expired before any run
     pending --> cancelled: cancel
     claimed --> cancelled: cancel (cooperative)
@@ -146,6 +160,13 @@ attempt = $2`, so a slow earlier holder whose claim expired and was
 reclaimed finds its completion refused. That is a real fence for the
 *job record*. It is not a fence for the handler's side effects, so
 **handlers must still be idempotent** (`19`).
+
+When the job needs an assumed session, **the claim mints one** (below) and
+the end of the claim revokes it. That extends the fence beyond the job
+record: a stale executor's late operations that pass through authorization
+find its session expired or revoked and are denied. It still does not
+cover effects outside authorization — a file written, a message sent — so
+handlers stay idempotent.
 
 Claiming is **pull**, which gives consent for free: an executor claims only
 as many jobs as its governor can admit right now, so back-pressure is "do
@@ -183,25 +204,99 @@ may all try to insert the same slot; exactly one insert wins and the rest
 are no-ops. So recurring jobs need no leader election, which fits the
 rule that node roles should tolerate many holders.
 
-## Submission, idempotency, authority
+## Submission and idempotency
 
 1. **Submit is an enqueue.** It validates parameters, checks the kind
-   exists, and inserts. With an `IdempotencyKey`, a repeat for the same
-   `(task_key, key)` returns the existing job, and a repeat whose
-   parameters differ is `ErrConflict`, matching `RegisterEndpoint`'s rule.
-2. **Who may submit** is a permission per kind
-   (`TaskDefinition.RequiredPermissionKey`), checked by an integration
-   (`jobsauth`) with `evaluation.RequirePermission`, the same shape as
-   `vitalsauth`.
-3. **Whose authority a job runs under** is recorded at submission:
-   `service_action` by default, `scheduled_task` (with the schedule as
-   reference) for materialized jobs, and `delegated_authority` plus
-   `OnBehalfOf` only when acting for another principal, where `09`'s rule
-   holds — the effective authority is the intersection, checked at
-   execution time.
-4. **A node claiming jobs** needs a claim permission for itself, so a
-   compromised or misconfigured node cannot start pulling work it was
-   never meant to run.
+   exists, fixes `ParamsHash`, and inserts. With an `IdempotencyKey`, a
+   repeat for the same `(task_key, key)` returns the existing job, and a
+   repeat whose parameters differ is `ErrConflict`, matching
+   `RegisterEndpoint`'s rule.
+2. **Retry is opt-in.** Lighthouse's v1 jobs deliberately marked a lapsed
+   claim `abandoned` and did not requeue, to avoid surprise duplicate
+   execution. The same caution applies here: a kind is retried
+   automatically only if its definition says `Idempotent`. Otherwise an
+   expired claim ends in `dead`, visible and deliberate, and a retry is a
+   new submission.
+
+## Whose authority: actor, requester, effective principal
+
+Authority comes from **contexts, with no second ACL for jobs** — the same
+choice Lighthouse made, and the same pattern `aliasauth` and `vitalsauth`
+already use. A job belongs to a **queue**, whose key is a context ID under
+the context type `jobs.queue`. The generic permissions are `jobs.submit`,
+`jobs.read`, `jobs.claim` and `jobs.cancel`, each evaluated on that queue
+context. An app picks its granularity: one queue, or one per kind of work.
+Listing filters to queues the caller may read. Queue contexts are optional
+records but mandatory authorization scopes. (A claimant needs no separate
+"update" permission: holding the current claim token is what lets it
+heartbeat and complete.)
+
+A job's execution involves four facts, defined in `09`'s "Assumed
+sessions": **A** the actor (the runner), **B** the requester (the owner),
+**C** the effective principal whose permissions apply, and the authority
+source. `AuthorityMode` selects among the cases that matter:
+
+| Mode | C is | Authority source (`09`) | Example |
+|---|---|---|---|
+| `owner` | B | `delegated_authority` | a user's own export job |
+| `service` | A | `service_action` (or `scheduled_task` for materialized jobs) | refresh a cache |
+| `assumed` | a third principal | `assumed_authority` | restore a backup as a dedicated principal |
+
+1. **Effective authority** is C's *current* grants intersected with the
+   task kind's declared `Scope`, checked at execution time. A handler can
+   therefore never use something else the owner happens to hold, such as
+   their admin rights. The submitter may narrow the scope per job, never
+   widen it.
+2. **Nothing credential-like moves.** The runner is not given the owner's
+   secrets. Its operations are authorized by asking the authority store
+   whether C holds a permission, identified by principal ID.
+3. **`owner` needs no extra grant:** a principal can always run its own
+   work, narrowed. **`assumed` needs both edges** from `09` — the requester
+   may cause work as C, and the claimant may execute as C — checked at
+   submission and again at claim.
+4. **At claim, `jobsauth` calls `AssumeSession`** with A as creator, B as
+   requester and C as principal, expiring with the claim, bound to
+   `(job, attempt)`. The handler's execution context carries that session
+   and the scope. It is never given A's own identity for that job.
+5. **Ownership.** B can read and cancel their own jobs without queue-wide
+   grants, so a lower-level principal stays in control of what it
+   submitted. Who is credited with data the handler creates, B or C, is the
+   application's decision; the framework hands the handler both.
+6. **A denial at run time is terminal.** If B, C or an edge has lost the
+   needed permission by the time the job runs, it ends `dead` with an
+   authority-denied reason and is not retried. Retrying a permission failure
+   never helps.
+7. **A claimant needs `jobs.claim` on the queue it pulls from,** so a
+   misconfigured node cannot start taking work it was never meant to run.
+8. **The runner is trusted within the scope** of the jobs it holds. A
+   compromised runner could misuse those scopes; the blast radius is limited
+   by keeping each kind's declared scope narrow and claim windows short. A
+   stronger setting that keeps a runner away from direct data access
+   (`mediated`) is a possible later hardening and is not designed here.
+
+```mermaid
+sequenceDiagram
+    participant B as Requester B
+    participant J as jobsauth
+    participant S as Jobs store
+    participant A as Runner A
+    participant G as Gatehouse-core
+
+    B->>J: submit(kind, params, mode)
+    J->>G: B may submit on queue? (assumed: B may cause as C?)
+    G-->>J: ok
+    J->>S: enqueue (ParamsHash fixed)
+    A->>J: claim(queue)
+    J->>G: A may claim on queue? (assumed: A may execute as C?)
+    G-->>J: ok
+    J->>S: claim (attempt n)
+    J->>G: AssumeSession(creator A, requester B, as C, expires with claim)
+    G-->>J: session S
+    J-->>A: job + execution context (S, scope)
+    Note over A,G: every operation is evaluated as C and must be within scope
+    A->>J: complete(attempt n)
+    J->>G: revoke S
+```
 
 ## Crossing boundaries
 
@@ -246,7 +341,11 @@ surface would not be.
 1. **`jobs`** — a new base with structure / evaluation / storage / facade
    and a Postgres store. It depends on `logging` (for the span type) and
    `typedvalue` (parameter schemas) and on no other base.
-2. **`jobsauth`** — `jobs` + Gatehouse-core: submit and claim permissions.
+2. **`jobsauth`** — `jobs` + Gatehouse-core: queue-context permissions,
+   the authority modes above, and minting and revoking the assumed session
+   at claim.
+   Gatehouse-core itself gains the `assumed` session kind and
+   `AssumeSession` (`09`); that is a prerequisite and is not part of `jobs`.
 3. **`noderoles` + `jobs`** — the executor node role claims through the
    governor's admission; the housekeeping node roles live here.
 4. **`jobs` + Transit** — the pushed-delivery path, once a Router exists.
@@ -265,30 +364,44 @@ surface would not be.
 4. The task registry is its own record type; a task kind is not an
    endpoint.
 5. All timestamps are the database's.
+6. Authorization is by queue context with generic `jobs.*` permissions; no
+   per-kind permission keys and no second ACL.
+7. Three authority modes — `owner`, `service`, `assumed` — realized by an
+   assumed session minted per claim and revoked at its end; scope declared by
+   the task kind.
+8. Retry only for kinds declared `Idempotent`; authority denials are
+   terminal.
+9. Delegation of a *subset* to a different principal, and chained
+   delegation, remain deferred.
 
 ## Open questions
 
-1. **Where recurrence math lives.** `scheduler` (the in-process one) and
+1. **Per-owner limits.** If users can submit freely, one could flood a
+   queue; a cap on a single owner's pending jobs fits the consent idea in
+   `19`. Not designed.
+2. **A per-job event trail.** Lighthouse kept a `job_events` table for
+   debugging; here only logs and Vitals exist.
+3. **Where recurrence math lives.** `scheduler` (the in-process one) and
    `jobs` both need "next occurrence after t." A small shared zero-dependency
    module would avoid duplicating it and avoid one base importing another.
    For calendar expressions a library such as `robfig/cron` is the obvious
    candidate, to be checked against its real behavior before anything is
    chosen.
-2. **Reserved-namespace check.** `jobs` cannot import Gatehouse-core's
+4. **Reserved-namespace check.** `jobs` cannot import Gatehouse-core's
    unexported list. Either `jobs` takes the list as an option, `jobsauth`
    performs the check, or the list moves somewhere shared.
-3. **A local outbox for submissions.** A node with conditional store access
+5. **A local outbox for submissions.** A node with conditional store access
    (`17`) might want to buffer submissions while the store is unreachable.
    That is at-least-once from the application's view and raises ordering
    and duplication questions; not designed.
-4. **Target selection beyond a named instance.** By label needs the label
+6. **Target selection beyond a named instance.** By label needs the label
    type from `18`.
-5. **Size limits** for `Params`, `Result` and `LastError`, and how long
+7. **Size limits** for `Params`, `Result` and `LastError`, and how long
    finished jobs are retained by default.
-6. **Result delivery for streaming tasks** (`19` decided events by default,
+8. **Result delivery for streaming tasks** (`19` decided events by default,
    channels only for kinds that declare streaming); how that interacts with
    the stored `Result`.
-7. **Fairness across kinds.** Priority orders claiming, but nothing yet
+9. **Fairness across kinds.** Priority orders claiming, but nothing yet
    stops one busy kind from filling every claim slot.
-8. **Heartbeat cost.** How often an executor extends a claim, and whether
+10. **Heartbeat cost.** How often an executor extends a claim, and whether
    the interval derives from `AttemptTimeout`.
