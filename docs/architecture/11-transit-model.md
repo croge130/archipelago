@@ -241,6 +241,10 @@ lower-risk order; it is not a claim that WebTransport is less wanted.
   router sitting above `Backend.Accept` isn't designed here — this
   doc fixes the wire shape and the Session/Channel/Backend contracts
   a router would be built on, not the router itself.
+  **Now designed (still unbuilt) in
+  [`21-router-and-handshake-model.md`](21-router-and-handshake-model.md)**,
+  which also records what this layer was missing for it: a receive
+  interface, a client-side call, and a purpose on a channel.
 - **mTLS wiring and cert-as-credential meaning.** `PeerIdentity` is
   surfaced; resolving it into a principal is the later mTLS
   integration (Transit + Cert-store + Gatehouse-core), per
