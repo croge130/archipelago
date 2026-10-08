@@ -24,6 +24,7 @@ type Session struct {
 }
 
 var _ transit.Session = (*Session)(nil)
+var _ transit.Conn = (*Session)(nil)
 
 // NewPipe returns two connected Sessions, each the other's peer —
 // the in-memory analogue of net.Pipe at the Session level.
@@ -122,7 +123,7 @@ func (s *Session) Next(ctx context.Context) (wire.Message, error) {
 
 func (s *Session) OpenChannel(ctx context.Context, opts transit.ChannelOpts) (transit.Channel, error) {
 	id := wire.NewChannelID(opts.Initiator)
-	local, remote := newChannelPair(id)
+	local, remote := newChannelPair(id, opts.Type, opts.Params)
 	select {
 	case s.peer.channelOpens <- remote:
 		return local, nil

@@ -14,6 +14,8 @@ use (
 	./peerauth
 	./policy
 	./registry
+	./router
+	./routere2e
 	./sdk
 	./sdkdb
 	./sessions

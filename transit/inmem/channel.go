@@ -2,6 +2,7 @@ package inmem
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 
 	"github.com/croge130/archipelago/transit"
@@ -12,6 +13,8 @@ import (
 // together by newChannelPair.
 type Channel struct {
 	id          string
+	typ         string
+	params      json.RawMessage
 	outbox      chan wire.Message // this end writes here; closing it tells the peer "no more sends"
 	inbox       chan wire.Message // this end reads here (the peer's outbox)
 	closeOnce   sync.Once
@@ -20,16 +23,20 @@ type Channel struct {
 
 var _ transit.Channel = (*Channel)(nil)
 
-func newChannelPair(id string) (a, b *Channel) {
+func newChannelPair(id, typ string, params json.RawMessage) (a, b *Channel) {
 	const bufSize = 16
 	ab := make(chan wire.Message, bufSize)
 	ba := make(chan wire.Message, bufSize)
-	a = &Channel{id: id, outbox: ab, inbox: ba, localClosed: make(chan struct{})}
-	b = &Channel{id: id, outbox: ba, inbox: ab, localClosed: make(chan struct{})}
+	a = &Channel{id: id, typ: typ, params: params, outbox: ab, inbox: ba, localClosed: make(chan struct{})}
+	b = &Channel{id: id, typ: typ, params: params, outbox: ba, inbox: ab, localClosed: make(chan struct{})}
 	return a, b
 }
 
 func (c *Channel) ID() string { return c.id }
+
+func (c *Channel) Type() string { return c.typ }
+
+func (c *Channel) Params() json.RawMessage { return c.params }
 
 func (c *Channel) Send(ctx context.Context, msg wire.Message) error {
 	select {

@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 
 	"github.com/croge130/archipelago/transit"
@@ -12,8 +13,10 @@ import (
 // WebSocket stream — stream_open/stream_data/stream_end frames
 // carrying its id are how the two peers' Conns demux it back out.
 type Channel struct {
-	id   string
-	conn *Conn
+	id     string
+	typ    string
+	params json.RawMessage
+	conn   *Conn
 
 	inbox       chan wire.Message
 	inboxClosed bool // readLoop-owned only; see peerDone and Conn.dispatch's stream_data case
@@ -23,9 +26,11 @@ type Channel struct {
 
 var _ transit.Channel = (*Channel)(nil)
 
-func newChannel(id string, conn *Conn) *Channel {
+func newChannel(id, typ string, params json.RawMessage, conn *Conn) *Channel {
 	return &Channel{
 		id:          id,
+		typ:         typ,
+		params:      params,
 		conn:        conn,
 		inbox:       make(chan wire.Message, 32),
 		localClosed: make(chan struct{}),
@@ -33,6 +38,10 @@ func newChannel(id string, conn *Conn) *Channel {
 }
 
 func (c *Channel) ID() string { return c.id }
+
+func (c *Channel) Type() string { return c.typ }
+
+func (c *Channel) Params() json.RawMessage { return c.params }
 
 func (c *Channel) Send(ctx context.Context, msg wire.Message) error {
 	select {

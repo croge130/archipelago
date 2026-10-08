@@ -112,6 +112,8 @@ archipelago/
   registry/                   # gatehouse-core (Instance/Lease) + peerauth
   vitalsauth/                 # vitals + gatehouse-core
   jobsauth/                   # jobs + gatehouse-core
+  router/                     # transit + wire + logging; the dispatch layer (21)
+  routere2e/                  # tests only: the router over a real websocket
   vitalsdefaults/             # vitals + policy
   traceagg/                   # Transit + wire + logging (not registry
                                  # directly — see 16-trace-log-aggregation-

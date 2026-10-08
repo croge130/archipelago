@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 
 	coderws "github.com/coder/websocket"
@@ -111,8 +112,8 @@ func (c *Conn) Next(ctx context.Context) (wire.Message, error) {
 
 func (c *Conn) OpenChannel(ctx context.Context, opts transit.ChannelOpts) (transit.Channel, error) {
 	id := wire.NewChannelID(opts.Initiator)
-	ch := c.registerChannel(id)
-	data, err := wire.Encode(wire.Message{Kind: wire.KindStreamOpen, Channel: id})
+	ch := c.registerChannel(id, opts.Type, opts.Params)
+	data, err := wire.Encode(wire.Message{Kind: wire.KindStreamOpen, Channel: id, Type: opts.Type, Payload: opts.Params})
 	if err != nil {
 		c.removeChannel(id)
 		return nil, err
@@ -137,8 +138,8 @@ func (c *Conn) AcceptChannel(ctx context.Context) (transit.Channel, error) {
 	}
 }
 
-func (c *Conn) registerChannel(id string) *Channel {
-	ch := newChannel(id, c)
+func (c *Conn) registerChannel(id, typ string, params json.RawMessage) *Channel {
+	ch := newChannel(id, typ, params, c)
 	c.mu.Lock()
 	c.channels[id] = ch
 	c.mu.Unlock()
@@ -195,7 +196,7 @@ func (c *Conn) readLoop() {
 func (c *Conn) dispatch(msg wire.Message) {
 	switch msg.Kind {
 	case wire.KindStreamOpen:
-		ch := c.registerChannel(msg.Channel)
+		ch := c.registerChannel(msg.Channel, msg.Type, msg.Payload)
 		select {
 		case c.acceptCh <- ch:
 		case <-c.closed:
@@ -229,3 +230,5 @@ func (c *Conn) dispatch(msg wire.Message) {
 		}
 	}
 }
+
+var _ transit.Conn = (*Conn)(nil)

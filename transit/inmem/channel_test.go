@@ -2,6 +2,7 @@ package inmem
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -10,7 +11,7 @@ import (
 )
 
 func newChannelPairForTest() (a, b *Channel) {
-	return newChannelPair(wire.NewChannelID(wire.InitiatorClient))
+	return newChannelPair(wire.NewChannelID(wire.InitiatorClient), "", nil)
 }
 
 func TestChannelSendRecv(t *testing.T) {
@@ -119,4 +120,34 @@ func TestChannelSendBlocksOnFullBufferUntilContextCancel(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected Send to block and then fail via context deadline once the buffer is full")
 	}
+}
+
+func TestOpenedChannelCarriesItsTypeAndParamsToBothEnds(t *testing.T) {
+	a, b := NewPipe()
+	ctx, cancel := withTimeout(t)
+	defer cancel()
+
+	params := json.RawMessage(`{"task":"export"}`)
+	opened, err := a.OpenChannel(ctx, transit.ChannelOpts{Initiator: wire.InitiatorClient, Bidirectional: true, Type: "jobs.progress", Params: params})
+	if err != nil {
+		t.Fatalf("OpenChannel: %v", err)
+	}
+	accepted, err := b.AcceptChannel(ctx)
+	if err != nil {
+		t.Fatalf("AcceptChannel: %v", err)
+	}
+	for name, ch := range map[string]transit.Channel{"opener": opened, "acceptor": accepted} {
+		if ch.Type() != "jobs.progress" || string(ch.Params()) != string(params) {
+			t.Errorf("%s sees type %q params %s, want jobs.progress %s", name, ch.Type(), ch.Params(), params)
+		}
+	}
+	// An untyped channel is still allowed at this layer.
+	plain, _ := a.OpenChannel(ctx, transit.ChannelOpts{Initiator: wire.InitiatorClient})
+	if plain.Type() != "" || plain.Params() != nil {
+		t.Errorf("an untyped channel should have no type or params, got %q %s", plain.Type(), plain.Params())
+	}
+}
+
+func TestSessionSatisfiesConn(t *testing.T) {
+	var _ transit.Conn = (*Session)(nil)
 }

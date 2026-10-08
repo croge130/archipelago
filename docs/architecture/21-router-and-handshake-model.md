@@ -1,6 +1,9 @@
 # The Router and the handshake
 
-**Status: design draft. Nothing here is built.** It resolves the gap that
+**Status: steps 1 to 3 of the build order are built** — `wire`'s protocol
+vocabulary, `transit`'s receive interface and typed channels, and the
+`router` base itself — see "Status" near the end. `routerauth` and moving
+the existing consumers onto routes are not. It resolves the gap that
 [`11-transit-model.md`](11-transit-model.md) deliberately left ("a real
 router sitting above `Backend.Accept` isn't designed here") and that
 `15`, `16`, `18`, `19` and `20` each name as the thing they are waiting
@@ -304,13 +307,65 @@ code and the duration, as structured attributes.
 4. The pushed half of `20` (`jobs.run`, `jobs.result`) has somewhere to
    live.
 
+## Status
+
+**Built:**
+
+1. **`wire`** — `MinProtocol`/`MaxProtocol` with a changelog, `Hello` and
+   `HelloReply`, `NegotiateVersion`, the closed set of error codes,
+   `ErrorReply` and `DecodeError`. `Message.Validate` now accepts a channel's
+   `stream_data`/`stream_end` frames identified by their `Channel` alone, and
+   requires a `Channel` on every stream frame; every other message still
+   needs a `Type`.
+2. **`transit`** — a `Receiver` interface and a `Conn` that is both it and
+   `Session`; `ChannelOpts.Type` and `Params`, carried in `stream_open`, and
+   `Type()`/`Params()` on both ends of a channel. Both backends updated and
+   asserted to satisfy `Conn`.
+3. **`router`** — `Router` (routes and channel routes, registered once;
+   duplicates, the `transit.` namespace and versioned routes are refused),
+   `Peer` (`Accept` for a session this node accepted, `Connect` for one it
+   dialed, `Call`, `Push`, `OpenChannel`), the handshake with its timeout,
+   sequential-by-default routes with opt-in concurrency, the per-session
+   in-flight limit, cooperative cancellation, panic recovery, coded errors,
+   authorizer hooks, child spans, and typed-channel dispatch.
+4. **`routere2e`** — a test-only module running the router over the real
+   websocket backend, so `router` itself depends on no backend.
+
+**Tested:** over the in-memory backend and, once, over a real websocket —
+the handshake, a call, an unknown route, a typed channel with its params, a
+cancel frame crossing the network, and a lost connection failing calls
+instead of hanging them. Removing the handshake gate, or the panic recovery,
+makes tests fail.
+
+**Findings from building it, worth recording:**
+
+1. **`Channel.Done()` fires on a local close only,** by design (channels are
+   half-duplex). A peer that closes a channel is noticed through `Recv`
+   returning `ErrChannelClosed`. The router closes a channel with no route
+   or before the handshake, and the opener sees exactly that.
+2. **A channel's close reason is not conveyed to the peer.** The router
+   passes a reason (`unknown_route`, `busy`, …) to `Close`, but neither
+   backend sends it, so the opener learns *that* the channel closed, not
+   why. Cheap to add to the `stream_end` frame; not done.
+3. **`Session` has no "send a request" method.** `Reply` answers and `Push`
+   sends, and both just write a frame, so the router uses `Push` for
+   everything a node initiates. The interface names a delivery class, not a
+   direction, and this is where that shows.
+4. **An event over the in-flight limit is dropped and counted** — it has no
+   reply path to say `busy` on. `Peer.DroppedEvents` exposes the count.
+   This is the honest consequence of a bounded limit with no
+   application-level event acknowledgement, and it is the strongest argument
+   for deciding open question 2 below.
+
 ## Not designed here
 
 1. **Binding the in-flight limit to the node-wide governor** (`19`), and
    priority for inbound work.
 2. **Whether the Router sends `ack` for events.** The `ack` kind exists;
-   reliable delivery is the transport's job, and nothing yet needs an
-   application-level acknowledgement.
+   reliable delivery is the transport's job. But an event over the in-flight
+   limit is currently dropped and counted (see Status), which is lossy for a
+   delivery class documented as reliable; an application-level ack or a
+   blocking policy for events would fix that, and is undecided.
 3. **Protocol editions** beyond the cheap `RouteKey.Version` anticipation.
 4. **A second backend's effect.** The Router should be backend-agnostic by
    construction (it sees `Receiver` and `Session`), but the websocket

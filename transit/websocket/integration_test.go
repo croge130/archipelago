@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -234,5 +235,35 @@ func TestConcurrentPushIsRaceFree(t *testing.T) {
 		if _, err := client.Next(ctx); err != nil {
 			t.Fatalf("Next %d: %v", i, err)
 		}
+	}
+}
+
+func TestChannelTypeAndParamsCrossARealConnection(t *testing.T) {
+	server, client, cleanup := dialPair(t)
+	defer cleanup()
+	ctx, cancel := withTimeout(t)
+	defer cancel()
+
+	accepted := make(chan transit.Channel, 1)
+	go func() {
+		ch, err := client.AcceptChannel(ctx)
+		if err != nil {
+			t.Errorf("AcceptChannel: %v", err)
+			return
+		}
+		accepted <- ch
+	}()
+
+	params := json.RawMessage(`{"task":"export"}`)
+	opened, err := server.OpenChannel(ctx, transit.ChannelOpts{Initiator: wire.InitiatorServer, Bidirectional: true, Type: "console.relay", Params: params})
+	if err != nil {
+		t.Fatalf("OpenChannel: %v", err)
+	}
+	ch := <-accepted
+	if opened.Type() != "console.relay" || ch.Type() != "console.relay" {
+		t.Errorf("type: opener %q, acceptor %q, want console.relay on both", opened.Type(), ch.Type())
+	}
+	if string(ch.Params()) != string(params) {
+		t.Errorf("the acceptor's params = %s, want %s", ch.Params(), params)
 	}
 }

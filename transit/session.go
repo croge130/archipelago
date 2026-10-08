@@ -2,6 +2,7 @@ package transit
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 
 	"github.com/croge130/archipelago/wire"
@@ -46,11 +47,27 @@ type Session interface {
 type ChannelOpts struct {
 	Initiator     wire.Initiator
 	Bidirectional bool
+
+	// Type says what the channel is for (a console relay, a subscription,
+	// a streaming task), and Params optionally carries its setup. Both
+	// travel in the stream_open frame and are visible to the accepting
+	// side, which is what lets a router dispatch an accepted channel to
+	// the right handler. An empty Type is allowed at this layer; whether a
+	// router accepts it is the router's decision.
+	Type   string
+	Params json.RawMessage
 }
 
 // Channel is one long-lived logical stream, scoped to a Session.
 type Channel interface {
 	ID() string
+
+	// Type and Params are what the opener said the channel is for, on
+	// both ends: the opener sees what it passed, the acceptor what the
+	// stream_open frame carried.
+	Type() string
+	Params() json.RawMessage
+
 	Send(ctx context.Context, msg wire.Message) error
 	Recv(ctx context.Context) (wire.Message, error)
 	Close(reason string) error
@@ -62,4 +79,23 @@ type Channel interface {
 type Backend interface {
 	Accept(ctx context.Context) (Session, error)
 	Close() error
+}
+
+// Receiver is the inbound side of a session: the messages and channels
+// the peer sends. Session is deliberately outbound-only (Reply, Push,
+// OpenChannel); anything that runs a receive loop — a router — takes a
+// value that is both. Both backends satisfy it.
+//
+// Next returns the next message that was not part of a channel, in
+// arrival order. AcceptChannel returns the next channel the peer opened.
+// Both return ErrSessionClosed once the session ends.
+type Receiver interface {
+	Next(ctx context.Context) (wire.Message, error)
+	AcceptChannel(ctx context.Context) (Channel, error)
+}
+
+// Conn is what a router needs from a connection: send and receive.
+type Conn interface {
+	Session
+	Receiver
 }

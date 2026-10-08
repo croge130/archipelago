@@ -85,7 +85,15 @@ func (m Message) Normalize() Message {
 }
 
 func (m Message) Validate() error {
-	if m.Type == "" {
+	// A channel's data and end frames are identified by their Channel and
+	// carry no Type of their own; every other message needs one.
+	channelFrame := m.Kind == KindStreamData || m.Kind == KindStreamEnd
+	switch {
+	case channelFrame && m.Channel == "":
+		return fmt.Errorf("wire: message: a %s frame requires a Channel", m.Kind)
+	case m.Kind == KindStreamOpen && m.Channel == "":
+		return fmt.Errorf("wire: message: a stream_open frame requires a Channel")
+	case m.Type == "" && !channelFrame:
 		return fmt.Errorf("wire: message: Type is required")
 	}
 	if m.Kind != "" && !m.Kind.Valid() {
