@@ -15,6 +15,7 @@ use (
 	./policy
 	./registry
 	./router
+	./routerauth
 	./routere2e
 	./sdk
 	./sdkdb

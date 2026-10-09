@@ -168,12 +168,11 @@ flowchart TB
 - **Revocation/archival of an `EndpointDefinition`.** `PermissionDefinition`
   itself has no archive/lifecycle field yet either — `EndpointDefinition`
   doesn't invent one its closest sibling doesn't have.
-- **A real, wire-callable advertisement endpoint.** `04-facades-and-
-  ergonomics.md`'s original mermaid diagram pictures a caller asking
-  "list available" of an actual network endpoint. What's built here —
-  `ListEndpoints`/`AdvertiseEndpoints` — is an ordinary Go function a
-  caller invokes in-process; nothing wires it to a Transit message a
-  remote peer could send. That's the same Router/dispatch gap
-  `16-trace-log-aggregation-model.md` already named as unbuilt, not a
-  separate omission — whichever feature gets a real Router first,
-  `AdvertiseEndpoints` is a one-line handler on top of it, not new logic.
+- **A wire-callable advertisement endpoint is now built**, in
+  [`21-router-and-handshake-model.md`](21-router-and-handshake-model.md):
+  `routerauth.HandleEndpointsList` registers an `endpoints.list` route that
+  is a one-line handler over `AdvertiseEndpoints`, and `routerauth.ListEndpoints`
+  is the client half. `routerauth.Handle` also registers a route, its
+  authorizer and its `EndpointDefinition` in one call, which is what finally
+  makes the drift this doc exists to prevent structurally impossible for
+  routed endpoints.

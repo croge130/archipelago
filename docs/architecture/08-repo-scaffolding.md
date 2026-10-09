@@ -113,6 +113,7 @@ archipelago/
   vitalsauth/                 # vitals + gatehouse-core
   jobsauth/                   # jobs + gatehouse-core
   router/                     # transit + wire + logging; the dispatch layer (21)
+  routerauth/                 # router + peerauth + gatehouse-core: route, permission and endpoint in one call
   routere2e/                  # tests only: the router over a real websocket
   vitalsdefaults/             # vitals + policy
   traceagg/                   # Transit + wire + logging (not registry

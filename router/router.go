@@ -153,9 +153,11 @@ func validateRouteType(typ string) error {
 	return nil
 }
 
-// Handle registers a route. A duplicate type is an error rather than a
-// silent replacement, so two registrations can never fight over a name.
-func (r *Router) Handle(route Route) error {
+// Validate reports whether Handle would accept the route's own fields.
+// It cannot see whether the type is already taken. It exists so a caller
+// that must do other work before registering (routerauth writes the
+// endpoint definition first) can fail before doing any of it.
+func (route Route) Validate() error {
 	if err := validateRouteType(route.Type); err != nil {
 		return err
 	}
@@ -167,6 +169,26 @@ func (r *Router) Handle(route Route) error {
 	}
 	if route.Concurrency < 0 {
 		return fmt.Errorf("router: route %q: Concurrency must not be negative", route.Type)
+	}
+	return nil
+}
+
+// Validate is Route.Validate for a channel route.
+func (route ChannelRoute) Validate() error {
+	if err := validateRouteType(route.Type); err != nil {
+		return err
+	}
+	if route.Handler == nil {
+		return fmt.Errorf("router: channel route %q has no Handler", route.Type)
+	}
+	return nil
+}
+
+// Handle registers a route. A duplicate type is an error rather than a
+// silent replacement, so two registrations can never fight over a name.
+func (r *Router) Handle(route Route) error {
+	if err := route.Validate(); err != nil {
+		return err
 	}
 	if route.Concurrency == 0 {
 		route.Concurrency = 1
@@ -183,11 +205,8 @@ func (r *Router) Handle(route Route) error {
 
 // HandleChannel registers a handler for a typed channel.
 func (r *Router) HandleChannel(route ChannelRoute) error {
-	if err := validateRouteType(route.Type); err != nil {
+	if err := route.Validate(); err != nil {
 		return err
-	}
-	if route.Handler == nil {
-		return fmt.Errorf("router: channel route %q has no Handler", route.Type)
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()

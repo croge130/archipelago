@@ -1,9 +1,9 @@
 # The Router and the handshake
 
-**Status: steps 1 to 3 of the build order are built** — `wire`'s protocol
-vocabulary, `transit`'s receive interface and typed channels, and the
-`router` base itself — see "Status" near the end. `routerauth` and moving
-the existing consumers onto routes are not. It resolves the gap that
+**Status: steps 1 to 4 of the build order are built** — `wire`'s protocol
+vocabulary, `transit`'s receive interface and typed channels, the
+`router` base itself, and `routerauth` — see "Status" near the end. Moving
+the existing consumers onto routes is not. It resolves the gap that
 [`11-transit-model.md`](11-transit-model.md) deliberately left ("a real
 router sitting above `Backend.Accept` isn't designed here") and that
 `15`, `16`, `18`, `19` and `20` each name as the thing they are waiting
@@ -330,8 +330,23 @@ code and the duration, as structured attributes.
    authorizer hooks, child spans, and typed-channel dispatch.
 4. **`routere2e`** — a test-only module running the router over the real
    websocket backend, so `router` itself depends on no backend.
+5. **`routerauth`** — a `Registrar` over one router and one domain's
+   Gatehouse-core stores. `Handle` (and `HandleChannel`) registers the route,
+   builds its authorizer from `peerauth.Require`, and writes the
+   `EndpointDefinition` in one call, with the route key as the endpoint key.
+   `HandleEndpointsList(filterByGrant)` registers `endpoints.list` over
+   `facade.AdvertiseEndpoints`, and `ListEndpoints(ctx, peer)` is the client
+   half. `router` gained `Route.Validate`/`ChannelRoute.Validate`, and
+   `endpoints` joined Gatehouse-core's reserved namespaces.
 
-**Tested:** over the in-memory backend and, once, over a real websocket —
+**Tested:** `routerauth` against real Postgres: an endpoint enforces exactly
+the permission it advertises; an unregistered permission, a reserved
+namespace, an invalid route or a duplicate leaves no half-registration; a
+grant made after the session opened is honoured on the next call; each of an
+admin, an unprivileged peer, an unknown certificate and a peer with no
+identity sees only what it may call in `endpoints.list`; a typed channel is
+authorized like a route. Removing the authorizer, or ignoring the visibility
+filter, makes tests fail. `router` over the in-memory backend and, once, over a real websocket —
 the handshake, a call, an unknown route, a typed channel with its params, a
 cancel frame crossing the network, and a lost connection failing calls
 instead of hanging them. Removing the handshake gate, or the panic recovery,
@@ -356,6 +371,26 @@ makes tests fail.
    This is the honest consequence of a bounded limit with no
    application-level event acknowledgement, and it is the strongest argument
    for deciding open question 2 below.
+
+**Findings from `routerauth`:**
+
+1. **Registration order is validate, then define, then route.** The router has
+   no unregister, so the order is chosen so every failure that can be
+   predicted happens before anything is written; the one failure left for the
+   last step is a duplicate route, and then the definition is the one the
+   other registration already holds (or the call fails with `ErrConflict`).
+2. **A store failure during authorization is `unauthorized` on the wire.**
+   The authorizer returns an error and the router refuses; the caller cannot
+   tell a database outage from a denial. That is fail-closed and right for a
+   security check, and the real reason is in the log, but a caller retrying
+   an outage sees a permanent-looking refusal.
+3. **`endpoints.list` under filtering shows an unknown peer the public
+   endpoints only.** The nil principal holds nothing, so the same evaluator
+   that gates calls gates visibility. With filtering off the list is
+   everything, and a call still fails; seeing is not being allowed.
+4. **Routes and channel routes share one endpoint-key space** because the
+   registry has one. Registering both under one key is permitted only if
+   their definitions match, and is best avoided.
 
 ## Not designed here
 
@@ -393,8 +428,8 @@ makes tests fail.
    concurrency and the in-flight limit, cancellation, coded errors, typed
    channels. Tested over `inmem` first, then once over the websocket
    backend.
-4. **`routerauth`:** one-call registration (route + authorizer + endpoint
-   definition) and the `endpoints.list` route.
+4. **`routerauth`** *(built)*: one-call registration (route + authorizer +
+   endpoint definition) and the `endpoints.list` route.
 5. **Move the existing consumers** (`traceagg`, `registry`, SSO delivery)
    onto routes, which is also their first end-to-end test over a real
    backend.
