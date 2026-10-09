@@ -14,6 +14,8 @@ import (
 	"crypto/x509/pkix"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"math/big"
 	"os"
 	"testing"
@@ -24,7 +26,9 @@ import (
 	gatehouseFacade "github.com/croge130/archipelago/gatehouse-core/facade"
 	gatehouseDB "github.com/croge130/archipelago/gatehouse-core/storage/dbstore"
 	gatehouseStructure "github.com/croge130/archipelago/gatehouse-core/structure"
+	"github.com/croge130/archipelago/router"
 	"github.com/croge130/archipelago/sso/structure"
+	"github.com/croge130/archipelago/transit"
 	"github.com/croge130/archipelago/transit/inmem"
 	"github.com/croge130/archipelago/wire"
 )
@@ -220,5 +224,128 @@ func TestVerifyWrongSigningKeyDenied(t *testing.T) {
 	impostor := ticketSigner(t) // a different key entirely
 	if _, err := Verify(ctx, ghReader, impostor.Certificate(), ticket, "gamebridge", time.Now()); !errors.Is(err, ErrInvalidSignature) {
 		t.Fatalf("expected ErrInvalidSignature, got: %v", err)
+	}
+}
+
+// issuerPeer serves IssueHandler on a router whose accepting session
+// reports fingerprint as the verified peer identity ("" = none).
+func issuerPeer(t *testing.T, store *gatehouseDB.PostgresReader, signer certstoreEvaluation.Signer, cfg IssueConfig, fingerprint string) *router.Peer {
+	t.Helper()
+	cfg.Store, cfg.Signer = store, signer
+	h, err := IssueHandler(cfg)
+	if err != nil {
+		t.Fatalf("IssueHandler: %v", err)
+	}
+	quiet := router.Options{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	server := router.New(quiet)
+	if err := server.Handle(router.Route{Type: RouteIssue, Handler: h}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	dc, ac := inmem.NewPipe()
+	if fingerprint != "" {
+		ac.WithPeerIdentity(transit.PeerIdentity{Present: true, Fingerprint: fingerprint})
+	}
+	a := server.Accept(ac)
+	ctx, cancel := withTimeout(t)
+	defer cancel()
+	d, err := router.New(quiet).Connect(ctx, dc, "test")
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	t.Cleanup(func() { d.Close(); a.Close() })
+	return d
+}
+
+func remoteCode(t *testing.T, err error, want wire.ErrorCode) {
+	t.Helper()
+	var re *router.RemoteError
+	if !errors.As(err, &re) || re.Code != want {
+		t.Fatalf("error = %v, want remote code %q", err, want)
+	}
+}
+
+func TestIssueRouteVouchesForTheVerifiedPeerAndNobodyElse(t *testing.T) {
+	reader, writer := setupTest(t)
+	ctx, cancel := withTimeout(t)
+	defer cancel()
+	p, err := gatehouseFacade.EnsurePrincipal(ctx, reader, writer, "service.viewer", gatehouseStructure.PrincipalTypeServiceAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := gatehouseFacade.EnsureMTLSCredential(ctx, reader, writer, p.PrincipalID, "sha256:aaaa"); err != nil {
+		t.Fatal(err)
+	}
+	signer := ticketSigner(t)
+	peer := issuerPeer(t, reader, signer, IssueConfig{}, "sha256:aaaa")
+
+	ticket, err := RequestTicket(ctx, peer, "gamebridge", 30*time.Second)
+	if err != nil {
+		t.Fatalf("RequestTicket: %v", err)
+	}
+	if ticket.SubjectPrincipalID != p.PrincipalID || ticket.Audience != "gamebridge" {
+		t.Fatalf("ticket = %+v", ticket)
+	}
+	if got := ticket.ExpiresAt.Sub(ticket.IssuedAt); got != 30*time.Second {
+		t.Fatalf("lifetime = %s, want 30s", got)
+	}
+	// The relying party's own check accepts it.
+	if who, err := Verify(ctx, reader, signer.Certificate(), ticket, "gamebridge", time.Now()); err != nil || who.PrincipalID != p.PrincipalID {
+		t.Fatalf("Verify = %+v, %v", who, err)
+	}
+
+	// A subject smuggled into the request is ignored, not honoured.
+	other, _ := gatehouseFacade.EnsurePrincipal(ctx, reader, writer, "user.someone", gatehouseStructure.PrincipalTypeUser)
+	raw, err := peer.Call(ctx, RouteIssue, json.RawMessage(`{"audience":"gamebridge","SubjectPrincipalID":"`+other.PrincipalID.String()+`"}`))
+	if err != nil {
+		t.Fatalf("Call: %v", err)
+	}
+	var smuggled structure.Ticket
+	if err := json.Unmarshal(raw, &smuggled); err != nil || smuggled.SubjectPrincipalID != p.PrincipalID {
+		t.Fatalf("subject = %s (err %v), want the peer's own %s", smuggled.SubjectPrincipalID, err, p.PrincipalID)
+	}
+}
+
+func TestIssueRouteRefusesPeersThatResolveToNoPrincipal(t *testing.T) {
+	reader, _ := setupTest(t)
+	ctx, cancel := withTimeout(t)
+	defer cancel()
+	for name, fp := range map[string]string{"unknown certificate": "sha256:never", "no identity": ""} {
+		_, err := RequestTicket(ctx, issuerPeer(t, reader, ticketSigner(t), IssueConfig{}, fp), "gamebridge", 0)
+		t.Run(name, func(t *testing.T) { remoteCode(t, err, wire.ErrUnauthorized) })
+	}
+}
+
+func TestIssueRouteBoundsAndValidatesTheRequest(t *testing.T) {
+	reader, writer := setupTest(t)
+	ctx, cancel := withTimeout(t)
+	defer cancel()
+	p, _ := gatehouseFacade.EnsurePrincipal(ctx, reader, writer, "service.viewer", gatehouseStructure.PrincipalTypeServiceAccount)
+	if _, err := gatehouseFacade.EnsureMTLSCredential(ctx, reader, writer, p.PrincipalID, "sha256:aaaa"); err != nil {
+		t.Fatal(err)
+	}
+	peer := issuerPeer(t, reader, ticketSigner(t), IssueConfig{DefaultTTL: 20 * time.Second, MaxTTL: time.Minute}, "sha256:aaaa")
+
+	// No ttl takes the default.
+	if tk, err := RequestTicket(ctx, peer, "gamebridge", 0); err != nil || tk.ExpiresAt.Sub(tk.IssuedAt) != 20*time.Second {
+		t.Fatalf("default ttl: %+v, %v", tk, err)
+	}
+	// Over the maximum is refused, not shortened.
+	_, err := RequestTicket(ctx, peer, "gamebridge", 2*time.Minute)
+	remoteCode(t, err, wire.ErrInvalid)
+	// No audience, negative ttl, not json.
+	for name, payload := range map[string]string{"no audience": `{"audience":""}`, "negative ttl": `{"audience":"a","ttl_seconds":-5}`, "not json": `[`} {
+		_, err := peer.Call(ctx, RouteIssue, json.RawMessage(payload))
+		remoteCode(t, err, wire.ErrInvalid)
+		_ = name
+	}
+}
+
+func TestIssueHandlerRejectsBadConfig(t *testing.T) {
+	if _, err := IssueHandler(IssueConfig{}); err == nil {
+		t.Fatal("accepted a config with no store or signer")
+	}
+	reader, _ := setupTest(t)
+	if _, err := IssueHandler(IssueConfig{Store: reader, Signer: ticketSigner(t), DefaultTTL: time.Hour, MaxTTL: time.Minute}); err == nil {
+		t.Fatal("accepted a default ttl above the maximum")
 	}
 }

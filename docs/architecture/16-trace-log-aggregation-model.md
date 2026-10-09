@@ -131,24 +131,31 @@ buffer's only job is "hold enough to export before it rotates out."
 
 ## `traceagg`: Transit + registry, the actual Layer 3 integration
 
-Two halves, deliberately not a Router — see "What's deliberately out
-of scope" below for why a dispatch layer isn't built here even though
-it would make the receiving half more convenient.
+Two halves. The receiving half is a handler for the Router
+([`21-router-and-handshake-model.md`](21-router-and-handshake-model.md));
+the Router is not built here, and `traceagg` depends on it only for the
+handler type.
 
 ```go
 // Send side: an instance ships some of its own captured entries to a peer
-// it already has an open transit.Session to (discovered via registry —
+// it already has a router.Peer for (discovered via registry —
 // ListPeers/ListInstancesByGroup — the same "already built, just pointed
 // at a new audience" reasoning 13-registry-and-leases-model.md's own
-// Broadcast section used for Status aggregation).
-func PushEntries(ctx context.Context, session transit.Session, sourceInstanceID uuid.UUID, entries []logging.Entry) error
+// Broadcast section used for Status aggregation). Pusher is the one method
+// it needs, which *router.Peer satisfies.
+type Pusher interface {
+    Push(ctx context.Context, typ string, payload json.RawMessage) error
+}
+func PushEntries(ctx context.Context, peer Pusher, sourceInstanceID uuid.UUID, entries []logging.Entry) error
 
-// Receive side: a caller hands traceagg a message it already received,
-// however it received it — traceagg never calls Session.Next or any
-// backend-specific receive method itself.
+// Receive side: Handler is Ingest as a router.Handler, registered under
+// MessageTypeEntries (through routerauth, with whatever permission the
+// coordinator requires of reporters). Ingest remains for a caller that
+// already holds a received message.
 type Collector struct { /* in-memory, trace-ID-indexed */ }
 
 func NewCollector() *Collector
+func (c *Collector) Handler() router.Handler
 func (c *Collector) Ingest(msg wire.Message) error
 
 type TaggedEntry struct {
@@ -161,9 +168,11 @@ func (c *Collector) Trace(traceID string) []TaggedEntry // every captured entry 
 
 `PushEntries` marshals `{SourceInstanceID, Entries}` as the payload of
 a `wire.Message{Type: "traceagg.entries", Kind: wire.KindEvent}` and
-calls `Session.Push` — `EventPush`'s own guarantee (reliable,
+sends it with `Peer.Push` — `EventPush`'s own guarantee (reliable,
 no reply expected) is exactly right for "here's what happened, no
-response needed." `Collector.Ingest` is the inverse: given a message
+response needed." (One caveat the Router adds: an event arriving over a
+session's in-flight limit is dropped and counted, which is acceptable for
+diagnostics and is why this is not the shape for a job result.) `Collector.Ingest` is the inverse: given a message
 of that type, unmarshal and index each entry by its own `TraceID` —
 entries with no `TraceID` are dropped, not stored under an empty-string
 bucket, since "which causal story does this belong to" is the one
@@ -174,12 +183,12 @@ flowchart TB
     subgraph REPORTER["Reporting instance"]
         BUF["RingBuffer captures Entries as the app logs normally"]
         SELECT["Caller selects which Entries to ship<br/>(Recent(n), or ByTraceID for one story)"]
-        PUSH["PushEntries(session, sourceInstanceID, entries)<br/>→ wire.Message{Type: traceagg.entries, Kind: event}<br/>→ Session.Push (EventPush: reliable, no reply)"]
+        PUSH["PushEntries(peer, sourceInstanceID, entries)<br/>→ wire.Message{Type: traceagg.entries, Kind: event}<br/>→ Peer.Push (EventPush: reliable, no reply)"]
     end
 
     subgraph COORD["Coordinator process"]
-        RECV["However this process already receives inbound<br/>messages today (no Router exists yet — see<br/>'What's deliberately out of scope')"]
-        INGEST["Collector.Ingest(msg)<br/>unmarshal {SourceInstanceID, Entries},<br/>index each Entry under its own TraceID<br/>(no TraceID → dropped, not bucketed)"]
+        RECV["Router: handshake, then the route's<br/>authorizer (routerauth), then dispatch"]
+        INGEST["Collector.Handler → Ingest(msg)<br/>unmarshal {SourceInstanceID, Entries},<br/>index each Entry under its own TraceID<br/>(no TraceID → dropped, not bucketed)"]
         QUERY["Collector.Trace(traceID)<br/>→ []TaggedEntry, ordered by Time,<br/>each tagged with which instance reported it —<br/>the 'stitched causal story' a Viewer renders"]
     end
 
@@ -188,15 +197,11 @@ flowchart TB
 
 ## What's deliberately out of scope
 
-- **A real Router/dispatch layer.** `11-transit-model.md`'s own
-  deferred list already names this: "a real router sitting above
-  `Backend.Accept` isn't designed here." `Collector.Ingest` takes an
-  already-received `wire.Message` for the same reason `sso.Verify`
-  takes an already-received `Ticket` — it owns what to do with a
-  message, never how one arrived. Today, a caller wires this in the
-  same ad hoc way `sso`'s own integration test receives a delivered
-  ticket (calling the concrete backend's own receive method directly);
-  that stays true until a Router actually gets built.
+- **Owning the Router.** `Collector.Ingest` still takes an
+  already-received `wire.Message` and owns what to do with a message,
+  never how one arrived. The Router (now built, `21`) owns arrival, and
+  `Collector.Handler` is the one adapter between them. The end-to-end test
+  of this path, over real mTLS and a real database, lives in `routere2e`.
 - **Durable storage of collected entries.** `Collector` is in-memory,
   unbounded by nothing but process lifetime — a coordinator restart
   loses what it collected. This is consistent with the capture

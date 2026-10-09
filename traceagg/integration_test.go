@@ -1,17 +1,20 @@
 // Tests in this file need no database — traceagg has no storage of
-// its own. Delivery is exercised over a real (not mocked) transit/inmem
-// Session pair, the same shape sso's own integration test uses for
-// ticket delivery, proving PushEntries/Ingest compose with an actual
-// Transit message round-trip.
+// its own. Delivery is exercised through two real routers over a
+// transit/inmem pair: the reporter's Peer pushes, the coordinator's
+// router runs the handshake and dispatches to Collector.Handler.
 package traceagg
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
 	"testing"
 	"time"
 
 	"github.com/croge130/archipelago/logging"
+	"github.com/croge130/archipelago/router"
 	"github.com/croge130/archipelago/transit/inmem"
 	"github.com/croge130/archipelago/wire"
 	"github.com/google/uuid"
@@ -22,43 +25,79 @@ func withTimeout(t *testing.T) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.Background(), 5*time.Second)
 }
 
-func TestPushEntriesAndIngestEndToEndOverRealTransit(t *testing.T) {
+// connect runs a coordinator router with collector's handler registered
+// and returns the reporter's Peer.
+func connect(t *testing.T, collector *Collector) *router.Peer {
+	t.Helper()
+	quiet := router.Options{Logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	coordinator := router.New(quiet)
+	if err := coordinator.Handle(router.Route{Type: MessageTypeEntries, Handler: collector.Handler()}); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	reporterSide, coordinatorSide := inmem.NewPipe()
+	a := coordinator.Accept(coordinatorSide)
+	ctx, cancel := withTimeout(t)
+	defer cancel()
+	d, err := router.New(quiet).Connect(ctx, reporterSide, "reporter")
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	t.Cleanup(func() { d.Close(); a.Close() })
+	return d
+}
+
+// waitForTrace polls until the collector holds want entries for traceID:
+// a pushed event has no reply to wait on.
+func waitForTrace(t *testing.T, c *Collector, traceID string, want int) []TaggedEntry {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if got := c.Trace(traceID); len(got) >= want {
+			return got
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("Trace(%q) never reached %d entries; has %+v", traceID, want, c.Trace(traceID))
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestPushEntriesAndIngestEndToEndOverARouter(t *testing.T) {
 	ctx, cancel := withTimeout(t)
 	defer cancel()
 
-	reporterSide, coordinatorSide := inmem.NewPipe()
-	defer reporterSide.Close()
-	defer coordinatorSide.Close()
+	collector := NewCollector()
+	reporter := connect(t, collector)
 
 	sourceInstanceID := uuid.New()
 	entries := []logging.Entry{
 		{Time: time.Now(), Level: "INFO", Message: "job started", TraceID: "trace-1", SpanID: "span-1"},
 		{Time: time.Now(), Level: "NOTICE", Message: "job finished", TraceID: "trace-1", SpanID: "span-2"},
 	}
-
-	if err := PushEntries(ctx, reporterSide, sourceInstanceID, entries); err != nil {
+	if err := PushEntries(ctx, reporter, sourceInstanceID, entries); err != nil {
 		t.Fatalf("PushEntries: %v", err)
 	}
 
-	received, err := coordinatorSide.Next(ctx)
-	if err != nil {
-		t.Fatalf("Next: %v", err)
-	}
-
-	collector := NewCollector()
-	if err := collector.Ingest(received); err != nil {
-		t.Fatalf("Ingest: %v", err)
-	}
-
-	got := collector.Trace("trace-1")
-	if len(got) != 2 {
-		t.Fatalf("Trace(trace-1) = %+v, want 2 entries", got)
-	}
+	got := waitForTrace(t, collector, "trace-1", 2)
 	if got[0].Message != "job started" || got[1].Message != "job finished" {
 		t.Fatalf("Trace(trace-1) order = [%q, %q], want [job started, job finished]", got[0].Message, got[1].Message)
 	}
 	if got[0].SourceInstanceID != sourceInstanceID {
 		t.Fatalf("SourceInstanceID = %s, want %s", got[0].SourceInstanceID, sourceInstanceID)
+	}
+}
+
+func TestHandlerAnswersAMalformedBatchInvalid(t *testing.T) {
+	ctx, cancel := withTimeout(t)
+	defer cancel()
+	reporter := connect(t, NewCollector())
+
+	// Sent as a request so the coded error comes back; as an event it
+	// would only be logged.
+	_, err := reporter.Call(ctx, MessageTypeEntries, json.RawMessage(`{"Entries": 7}`))
+	var re *router.RemoteError
+	if !errors.As(err, &re) || re.Code != wire.ErrInvalid {
+		t.Fatalf("Call = %v, want remote code %q", err, wire.ErrInvalid)
 	}
 }
 
@@ -74,27 +113,17 @@ func TestIngestDropsEntriesWithNoTraceID(t *testing.T) {
 	ctx, cancel := withTimeout(t)
 	defer cancel()
 
-	a, b := inmem.NewPipe()
-	defer a.Close()
-	defer b.Close()
+	collector := NewCollector()
+	reporter := connect(t, collector)
 
 	entries := []logging.Entry{
 		{Time: time.Now(), Message: "no trace at all"},
 		{Time: time.Now(), Message: "has a trace", TraceID: "trace-1", SpanID: "span-1"},
 	}
-	if err := PushEntries(ctx, a, uuid.New(), entries); err != nil {
+	if err := PushEntries(ctx, reporter, uuid.New(), entries); err != nil {
 		t.Fatalf("PushEntries: %v", err)
 	}
-	received, err := b.Next(ctx)
-	if err != nil {
-		t.Fatalf("Next: %v", err)
-	}
-
-	collector := NewCollector()
-	if err := collector.Ingest(received); err != nil {
-		t.Fatalf("Ingest: %v", err)
-	}
-	if got := collector.Trace("trace-1"); len(got) != 1 || got[0].Message != "has a trace" {
+	if got := waitForTrace(t, collector, "trace-1", 1); len(got) != 1 || got[0].Message != "has a trace" {
 		t.Fatalf("Trace(trace-1) = %+v, want exactly the one entry that carried a TraceID", got)
 	}
 	// The untraced entry must not be queryable under an empty-string

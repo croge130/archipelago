@@ -11,9 +11,11 @@
 // to Status aggregation: traceagg only owns what to send and what to
 // do with what arrives, never how a Session was found or opened.
 //
-// It also does not own how a message arrives at all. Collector.Ingest
-// takes an already-received wire.Message, the same way sso.Verify
-// takes an already-received Ticket — no Router/dispatch layer exists
-// in this codebase yet (11-transit-model.md's own deferred list), and
-// this package doesn't build one just for its own convenience.
+// It does not own how a message arrives, either. Collector.Handler is
+// a router.Handler to register under MessageTypeEntries, and
+// PushEntries sends through anything shaped like a *router.Peer; the
+// handshake, authorization (via routerauth, with whatever permission a
+// coordinator requires of reporters) and in-flight limiting all belong
+// to the router in front of it. Collector.Ingest remains for a caller
+// that already holds a received message.
 package traceagg

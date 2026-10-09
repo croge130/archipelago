@@ -1,12 +1,14 @@
 package traceagg
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sort"
 	"sync"
 
 	"github.com/croge130/archipelago/logging"
+	"github.com/croge130/archipelago/router"
 	"github.com/croge130/archipelago/wire"
 	"github.com/google/uuid"
 )
@@ -57,6 +59,20 @@ func (c *Collector) Ingest(msg wire.Message) error {
 		c.byTrace[e.TraceID] = append(c.byTrace[e.TraceID], TaggedEntry{Entry: e, SourceInstanceID: batch.SourceInstanceID})
 	}
 	return nil
+}
+
+// Handler is Ingest as a router handler, for registering under
+// MessageTypeEntries (directly on a router, or through routerauth with
+// whatever permission the coordinator requires of reporters). A payload
+// that does not decode is answered `invalid` rather than `internal`: it
+// is the sender's fault, and the sender should be told so.
+func (c *Collector) Handler() router.Handler {
+	return func(_ context.Context, req router.Request) (json.RawMessage, error) {
+		if err := c.Ingest(req.Message); err != nil {
+			return nil, router.Errorf(wire.ErrInvalid, "%v", err)
+		}
+		return nil, nil
+	}
 }
 
 // Trace returns every entry collected for traceID, across every

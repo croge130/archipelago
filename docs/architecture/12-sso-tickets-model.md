@@ -210,6 +210,21 @@ to a Transit message to whatever protocol actually needs SSO (a future
 Viewer redirect flow is the most likely first real caller, not built
 here).
 
+**One route is built on top of that**
+([`21`](21-router-and-handshake-model.md)): `sso.IssueHandler`, registered
+as `sso.ticket.issue` (typically through `routerauth.Handle`, which decides
+which principals may ask), and `sso.RequestTicket` as its client half. A
+caller asks for a ticket bound to an audience and a lifetime (a default and
+a maximum are configured on the issuer; a request over the maximum is
+refused, not shortened), and the reply is the signed ticket. **The subject
+is always the principal the caller's verified certificate resolves to.**
+There is no subject field to forge, and a request that carries one has it
+ignored. What this deliberately does not cover is a ticket for someone
+*other* than the caller, which is what a Viewer login would need (the
+issuer authenticated a user by password or passkey, not by their
+certificate). That is delegation, needs its own permission, and is not
+designed.
+
 ## What's deliberately out of scope
 
 - **Replay protection beyond short expiry.** `TicketID` is carried as a

@@ -170,7 +170,19 @@ instance's identity in the registry is only ever as trustworthy as the
 mTLS-verified connection that registered it, never a caller-asserted
 `PrincipalID` with no transport-level backing.
 
-That one function is the whole package. `Heartbeat`, `Deregister`,
+That one function is the whole of the package's own logic. Since the Router
+([`21`](21-router-and-handshake-model.md)) exists it also ships
+`RegisterHandler`, which is that function as a `router.Handler` for the
+`registry.register` route, and `registry.Register`, the client half. The
+request carries a group and optional metadata and deliberately **no
+principal**: the instance belongs to whoever the connection's verified
+certificate resolves to. Registered with no permission, any peer that
+resolves to a principal may register itself into any group, which is what
+`RegisterFromSession` always allowed; registering through `routerauth.Handle`
+with a permission is how a deployment narrows that, and is the recommended
+shape.
+
+`Heartbeat`, `Deregister`,
 `ListPeers`, `AcquireOrRenewLease`, and `ReleaseLease` need neither
 Transit nor `peerauth`, so they're called directly as
 `gatehouse-core/facade` functions and are **not** re-wrapped here —

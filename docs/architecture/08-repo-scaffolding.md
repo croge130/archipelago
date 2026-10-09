@@ -108,15 +108,15 @@ archipelago/
   certcred/                   # gatehouse-core + certstore
   sessions/                   # gatehouse-core + Transit
   aliasauth/                  # alias + gatehouse-core
-  sso/                        # gatehouse-core + certstore + Transit
-  registry/                   # gatehouse-core (Instance/Lease) + peerauth
+  sso/                        # gatehouse-core + certstore + peerauth + router (IssueHandler)
+  registry/                   # gatehouse-core (Instance/Lease) + peerauth + router (RegisterHandler)
   vitalsauth/                 # vitals + gatehouse-core
   jobsauth/                   # jobs + gatehouse-core
   router/                     # transit + wire + logging; the dispatch layer (21)
   routerauth/                 # router + peerauth + gatehouse-core: route, permission and endpoint in one call
-  routere2e/                  # tests only: the router over a real websocket
+  routere2e/                  # tests only: the router and its consumers over real mTLS websockets
   vitalsdefaults/             # vitals + policy
-  traceagg/                   # Transit + wire + logging (not registry
+  traceagg/                   # router + wire + logging (not registry
                                  # directly — see 16-trace-log-aggregation-
                                  # model.md for why)
 

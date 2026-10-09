@@ -1,9 +1,10 @@
 # The Router and the handshake
 
-**Status: steps 1 to 4 of the build order are built** — `wire`'s protocol
+**Status: steps 1 to 5 of the build order are built** — `wire`'s protocol
 vocabulary, `transit`'s receive interface and typed channels, the
-`router` base itself, and `routerauth` — see "Status" near the end. Moving
-the existing consumers onto routes is not. It resolves the gap that
+`router` base itself, `routerauth`, and the existing consumers (`traceagg`,
+`registry`, `sso`) on routes — see "Status" near the end. Not built: the
+discovery module (`18`) and the executor/director routes (`20`). It resolves the gap that
 [`11-transit-model.md`](11-transit-model.md) deliberately left ("a real
 router sitting above `Backend.Accept` isn't designed here") and that
 `15`, `16`, `18`, `19` and `20` each name as the thing they are waiting
@@ -300,12 +301,14 @@ code and the duration, as structured attributes.
 
 1. `traceagg.Collector.Ingest` becomes the handler of an event route; the
    tests that reach into a concrete backend for the message go through a
-   `Peer`.
+   `Peer`. *(Done.)*
 2. `AdvertiseEndpoints` becomes callable by peers via `endpoints.list`.
+   *(Done.)*
 3. `registry.RegisterFromSession` and the SSO delivery become routes whose
-   authorizer resolves the peer through `peerauth`.
+   authorizer resolves the peer through `peerauth`. *(Done; SSO as
+   self-issuance only, see Status.)*
 4. The pushed half of `20` (`jobs.run`, `jobs.result`) has somewhere to
-   live.
+   live. *(Possible now; not built.)*
 
 ## Status
 
@@ -338,8 +341,15 @@ code and the duration, as structured attributes.
    `facade.AdvertiseEndpoints`, and `ListEndpoints(ctx, peer)` is the client
    half. `router` gained `Route.Validate`/`ChannelRoute.Validate`, and
    `endpoints` joined Gatehouse-core's reserved namespaces.
+6. **The existing consumers on routes.** `traceagg.Collector.Handler` and a
+   `traceagg.Pusher` (which `*router.Peer` satisfies; `PushEntries` now takes
+   it), `registry.RegisterHandler` and `registry.Register`, and
+   `sso.IssueHandler` and `sso.RequestTicket`. Each consumer depends on
+   `router` for the handler type and on nothing for authorization: a
+   deployment passes the handler to `routerauth.Handle` with the permission
+   it chooses.
 
-**Tested:** `routerauth` against real Postgres: an endpoint enforces exactly
+**Tested:** the consumers end to end over real mTLS, a real websocket and real Postgres, with every route registered through `routerauth`: an authorised peer registers an instance bound to its own principal, has its pushed entries collected, and is issued a ticket a relying party verifies; a peer holding no grants is refused on every route and is told about the public endpoints only (and its pushed entries are not collected). Making the trace route public makes both tests fail. `routerauth` against real Postgres: an endpoint enforces exactly
 the permission it advertises; an unregistered permission, a reserved
 namespace, an invalid route or a duplicate leaves no half-registration; a
 grant made after the session opened is honoured on the next call; each of an
@@ -371,6 +381,30 @@ makes tests fail.
    This is the honest consequence of a bounded limit with no
    application-level event acknowledgement, and it is the strongest argument
    for deciding open question 2 below.
+
+**Findings from moving the consumers:**
+
+1. **An unauthorized event is silent.** A pushed event has no reply to refuse
+   on, so the end-to-end test can only assert the absence of an effect (the
+   collector stays empty) and the refusal is visible in the log alone. This
+   is the second consequence of events having no application-level
+   acknowledgement, after the in-flight drop above, and it makes question 2
+   below more pressing for anything that is not diagnostics.
+2. **`sso.ticket.issue` issues for the caller only.** The existing design
+   left the request side open; a self-issuing route is the one shape with no
+   delegation question in it. A Viewer-style login (a user authenticated by
+   something other than their certificate) is not served and is not
+   designed. See `12`.
+3. **Core permission names and reserved namespaces for these routes are not
+   decided.** The consumers export route keys (`traceagg.entries`,
+   `registry.register`, `sso.ticket.issue`) and leave the permission to the
+   deployment. None of `traceagg`, `registry` or `sso` is in Gatehouse-core's
+   reserved namespaces, so an app could today register its own key there.
+4. **The first end-to-end test of any of these over a real backend** (real
+   mTLS websocket, real Postgres, certificates bound to principals) is
+   `routere2e`'s `consumers_test.go`. Making `PushEntries` take a `Pusher`
+   instead of a raw session was the one breaking change, and the only
+   callers were its own tests.
 
 **Findings from `routerauth`:**
 
@@ -430,8 +464,8 @@ makes tests fail.
    backend.
 4. **`routerauth`** *(built)*: one-call registration (route + authorizer +
    endpoint definition) and the `endpoints.list` route.
-5. **Move the existing consumers** (`traceagg`, `registry`, SSO delivery)
-   onto routes, which is also their first end-to-end test over a real
-   backend.
+5. **Move the existing consumers** *(built)* (`traceagg`, `registry`, SSO
+   delivery) onto routes, which is also their first end-to-end test over a
+   real backend.
 6. Only then: the zero-dependency discovery module (`18`), and the
    executor/director routes (`20`).
