@@ -601,3 +601,55 @@ func TestReadOnlyDepsFailClearlyOnWrites(t *testing.T) {
 		t.Error("Cancel with no jobs writer should fail clearly")
 	}
 }
+
+func TestResumeRebuildsAClaimFromTheStoreAndRefusesAnythingElse(t *testing.T) {
+	f := setup(t)
+	f.allowSubmit(t, f.owner.PrincipalID)
+	f.allowClaim(t, f.runner.PrincipalID)
+	f.allowExecuteAs(t, f.runner.PrincipalID, f.owner.PrincipalID)
+	f.grantOn(t, f.owner.PrincipalID, "myapp.report.read", "myapp.tenant", "acme")
+	f.submit(t, f.owner.PrincipalID, structure.AuthorityOwner, nil, "r1")
+	ready, _, err := Claim(ctxT(t), f.d, f.claimReq(f.runner))
+	if err != nil || len(ready) != 1 {
+		t.Fatalf("claim: %d %v", len(ready), err)
+	}
+	cj := ready[0]
+
+	got, err := Resume(ctxT(t), f.d, f.runner.PrincipalID, cj.JobID, cj.Attempt)
+	if err != nil {
+		t.Fatalf("Resume: %v", err)
+	}
+	if got.JobID != cj.JobID || got.EffectivePrincipalID != cj.EffectivePrincipalID || got.SessionID == nil || *got.SessionID != *cj.SessionID || len(got.Scope) != len(cj.Scope) {
+		t.Fatalf("resumed %+v, want it to match the claim %+v", got, cj)
+	}
+	// A resumed claim authorizes exactly as the original does.
+	if err := Authorize(ctxT(t), f.d, got, "myapp.report.read", "myapp.tenant", "acme"); err != nil {
+		t.Errorf("Authorize on a resumed claim: %v", err)
+	}
+	if err := Authorize(ctxT(t), f.d, got, "myapp.admin.all", "", ""); !errors.Is(err, ErrOutOfScope) {
+		t.Errorf("an undeclared permission on a resumed claim: %v", err)
+	}
+
+	// Someone else's claim, the wrong attempt and an unknown job are all
+	// ErrClaimLost and reveal nothing.
+	for name, call := range map[string]func() (ClaimedJob, error){
+		"another actor":   func() (ClaimedJob, error) { return Resume(ctxT(t), f.d, f.runner2.PrincipalID, cj.JobID, cj.Attempt) },
+		"another attempt": func() (ClaimedJob, error) { return Resume(ctxT(t), f.d, f.runner.PrincipalID, cj.JobID, cj.Attempt+1) },
+		"unknown job":     func() (ClaimedJob, error) { return Resume(ctxT(t), f.d, f.runner.PrincipalID, uuid.New(), 1) },
+	} {
+		r, err := call()
+		if !errors.Is(err, ErrClaimLost) || r.JobID != uuid.Nil {
+			t.Errorf("%s: got %+v, %v; want ErrClaimLost and an empty job", name, r, err)
+		}
+	}
+
+	// Once finished, the same actor and attempt is told so, with the record,
+	// so a retried completion can recognise that the first one landed.
+	if ok, err := Complete(ctxT(t), f.d, cj, nil); err != nil || !ok {
+		t.Fatalf("Complete: %v %v", ok, err)
+	}
+	r, err := Resume(ctxT(t), f.d, f.runner.PrincipalID, cj.JobID, cj.Attempt)
+	if !errors.Is(err, ErrClaimLost) || r.State != structure.StateSucceeded {
+		t.Errorf("after completion: state %q, err %v; want succeeded and ErrClaimLost", r.State, err)
+	}
+}

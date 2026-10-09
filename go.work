@@ -8,6 +8,8 @@ use (
 	./db
 	./gatehouse-core
 	./jobsauth
+	./jobsdirector
+	./jobsexec
 	./jobs
 	./logging
 	./mtls

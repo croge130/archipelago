@@ -3,8 +3,8 @@
 **Status: steps 1 to 5 of the build order are built** — `wire`'s protocol
 vocabulary, `transit`'s receive interface and typed channels, the
 `router` base itself, `routerauth`, and the existing consumers (`traceagg`,
-`registry`, `sso`) on routes — see "Status" near the end. Not built: the
-discovery module (`18`) and the executor/director routes (`20`). It resolves the gap that
+`registry`, `sso`) on routes, and the remote-executor routes of `20` — see
+"Status" near the end. Not built: the discovery module (`18`). It resolves the gap that
 [`11-transit-model.md`](11-transit-model.md) deliberately left ("a real
 router sitting above `Backend.Accept` isn't designed here") and that
 `15`, `16`, `18`, `19` and `20` each name as the thing they are waiting
@@ -342,8 +342,9 @@ code and the duration, as structured attributes.
 3. `registry.RegisterFromSession` and the SSO delivery become routes whose
    authorizer resolves the peer through `peerauth`. *(Done; SSO as
    self-issuance only, see Status.)*
-4. The pushed half of `20` (`jobs.run`, `jobs.result`) has somewhere to
-   live. *(Possible now; not built.)*
+4. The remote-executor half of `20` has somewhere to live. *(Done, as a
+   pull through a director rather than a push: `jobs.pull`, `jobs.heartbeat`,
+   `jobs.complete`, `jobs.fail`, `jobs.abandon`, `jobs.authorize`.)*
 
 ## Status
 

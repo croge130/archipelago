@@ -1,6 +1,7 @@
 # Jobs: durable deferred work
 
-**Status: the `jobs` base (first slice) and the `jobsauth` integration are built** — see "Status" near
+**Status: the `jobs` base (first slice), the `jobsauth` integration and remote executors
+(`jobsexec`, `jobsdirector`) are built** — see "Status" near
 the end for exactly what is and is not. The rest is still design. It turns the direction
 sketched in
 [`19-node-roles-and-resource-governance-model.md`](19-node-roles-and-resource-governance-model.md)
@@ -314,19 +315,81 @@ surface would not be.
 2. **A node without it** (`17`: no direct database access) submits through a
    node that has it. That is the remote store implementation and needs the
    Router (`11`).
-3. **An executor with no store access** is *pushed to*: a node with access
-   claims on its behalf and delivers the task over Transit as a
-   `request`, answered with an `ack` or a rejection (busy, or kind not
-   offered), and later a `result` sent back as a **request**, not an event
-   (21, "Events are not acknowledged"): a result must not be silently
-   dropped by a busy receiver, so the executor sends it with `Call` and
-   retries on `busy`. A retry that lands after the first is harmless because
-   completion is fenced on the attempt number. If the claiming node dies, the
-   claim expires and the job is retried; delivery stays at-least-once.
+3. **An executor with no store access pulls through a director.** This
+   revises an earlier draft that had the director push tasks to the
+   executor. A *director* is a node with store access that serves the routes
+   below; an *executor* is a node with handlers and no store, which only ever
+   *calls* its director. Pull keeps consent where it was (an executor asks
+   for as many jobs as it can admit, so back-pressure is still "do not
+   claim"), needs no listener or inbound routes on the executor (it can sit
+   behind NAT), and means the director holds no per-executor delivery state.
+   See "Remote executors" below.
 4. **Cancellation** sets the state if pending; if already claimed it is
    cooperative — the executor learns on its next heartbeat and cancels the
    handler's context (`wire` already has a `cancel` kind for the pushed
    case).
+
+## Remote executors: pulling through a director
+
+All of these are `Call`s from the executor to the director, over a router
+([`21`](21-router-and-handshake-model.md)), registered through `routerauth`.
+
+| Route | The executor says | The director does |
+|---|---|---|
+| `jobs.pull` | its instance, kinds, queues, how many | `jobsauth.Claim` *as the executor* |
+| `jobs.heartbeat` | job, attempt | extends the claim; replies whether it still holds it and whether cancellation was requested |
+| `jobs.complete` | job, attempt, result | `jobsauth.Complete` |
+| `jobs.fail` | job, attempt, error, whether it was an authority denial | `jobsauth.Fail` |
+| `jobs.abandon` | job, attempt, retry-after | `jobsauth.Abandon` |
+| `jobs.authorize` | job, attempt, permission, context | `jobsauth.Authorize` |
+
+1. **Whose identity claims.** The actor A is the principal the executor's
+   verified certificate resolves to, never a name in the payload. The
+   director passes that principal, and the executor's instance, to
+   `jobsauth.Claim`, so every consent check (`jobs.claim` on each queue, the
+   execute-as edge for an assumed job) is evaluated against the executor,
+   not against the director that is merely carrying the call. The instance
+   ID in the payload is checked: the registered instance must belong to the
+   caller's principal.
+2. **A gate before the queue checks.** The routes require a global
+   `jobs.execute` permission, which exists so that `endpoints.list` shows the
+   executor protocol only to peers meant to use it. It does not replace the
+   per-queue `jobs.claim` check, which still decides what may be pulled.
+3. **The director is stateless between calls.** Every call after the pull
+   names `(job, attempt)`. `jobsauth.Resume` rebuilds the claim from the store
+   and verifies it: the job is still claimed, under that attempt, by that
+   actor. Any director node can therefore serve any call, and a restart
+   loses nothing. A call whose claim is gone is told so.
+4. **Retries are safe.** A `complete` or `fail` for an attempt that already
+   finished with that same outcome, from that same actor, is answered as
+   applied-and-replayed, so an executor that lost a reply (or got `busy`)
+   can send it again. A different attempt, or a different actor, is refused.
+5. **Authority is mediated.** The executor holds no credentials and no store.
+   A handler about to do something that needs permission asks
+   `jobs.authorize`, and the director answers from the same check a local
+   handler would run: inside the declared scope, and permitted to the
+   effective principal now, through the assumed session where there is one.
+   A denial is distinguished from a failure, as in `jobsauth.Authorize`, so
+   the executor reports a denial terminally and anything else as an ordinary
+   failure. **What this protects:** the executor cannot grant itself
+   anything, because the decision is the director's. **What it does not:**
+   the executor remains trusted to *ask* before acting. For a node with no
+   store, nothing on the executor side can enforce that, and a handler that
+   skips the check can do whatever its own process can reach. The assumed
+   session bounds what the *store* will let that session do, not what a
+   rogue process can do to resources it reaches by other means. This is the
+   same boundary `Whose authority` already states, drawn at the process.
+6. **Cancellation is cooperative and rides the heartbeat.** The reply says
+   whether cancellation was requested; the executor cancels the handler's
+   context and hands the claim back, which turns the job `cancelled`. If the
+   heartbeat says the claim is gone, the executor stops and reports nothing.
+7. **A lost executor is a lapsed claim,** exactly as for a local one.
+8. **Not designed here:** a wake-up hint from director to executor (a lossy
+   `jobs.available` event would do, since polling remains the safety net);
+   submitting through a director (the other half of "a node without store
+   access"); mediating operations other than permission checks; and a
+   governor on the executor (it has a plain concurrency limit until `19` is
+   built).
 
 ## Observability and housekeeping
 
@@ -355,7 +418,11 @@ surface would not be.
    a prerequisite for this, are **built**, and are not part of `jobs`.
 3. **`noderoles` + `jobs`** — the executor node role claims through the
    governor's admission; the housekeeping node roles live here.
-4. **`jobs` + Transit** — the pushed-delivery path, once a Router exists.
+4. **`jobsexec` and `jobsdirector`** — the remote-executor path over the
+   Router (see "Remote executors"). `jobsexec` is the executor side and
+   depends on the router and nothing that touches Gatehouse-core or a
+   database; `jobsdirector` is the director side, over `jobsauth` and
+   `routerauth`.
 5. **`sdk`** — `Stores` gains a `Jobs` pair and `Modes` gains `Jobs`. As
    with every base, a node may hold its `Reader` without its `Writer`, or
    neither.
@@ -449,10 +516,74 @@ authorizes and completes an owner-mode job through nothing but the SDK's
 stores, then shows a read-only node reading the result while its writes
 fail clearly.
 
+**Built (remote executors):**
+
+1. **`jobsauth.Resume`** rebuilds a claim from the store alone, verifying it
+   is still claimed, under that attempt, by that actor; a claim that is no
+   longer held is `ErrClaimLost`, and carries the record only when it is the
+   actor's own attempt, so a retried completion can be recognised.
+2. **`jobsexec`** — the wire types and the `Executor`: `Handle` per kind,
+   `PullOnce`, `Run` (pull, heartbeat, report, hand back on shutdown), and
+   `Job.Authorize`. It asks for no more than its free capacity, cancels a
+   handler whose claim was lost or whose cancellation was requested (the
+   context's cause says which), reports nothing for a lost claim, hands a
+   claim back on cancellation or shutdown, recovers a handler panic as a
+   failure, and retries a call answered `busy`.
+3. **`jobsdirector`** — the six routes registered through `routerauth`,
+   gated by the global `jobs.execute`. Identity is the principal the
+   verified certificate resolves to, and the named instance must belong to it.
+4. **End to end,** `routere2e` runs an owner's job on an executor over real
+   mTLS: the executor registers itself through the registry route, pulls,
+   asks the director before acting, is refused an undeclared permission the
+   owner does hold, and completes.
+
+**Tested** (against real Postgres, over the in-memory pipe and, once, real
+mTLS): a service job runs on an executor holding no store; an owner's job
+authorizes through the director, a permission only the executor holds is
+refused as the owner, a declared-but-wrong-tenant and an undeclared one are
+out of scope, and a denial ends the job `dead` on the first attempt despite
+the kind being idempotent, with the session revoked; an ordinary failure is
+retried; the protocol refuses an executor without `jobs.execute`, without
+`jobs.claim` on the queue, using another principal's instance or an unknown
+one, and malformed requests; completion and failure are fenced by actor and
+attempt, and a retried one is confirmed instead of applied twice; a cancel
+request stops the handler and cancels the job; a lost claim stops the
+handler and its late result is not written; shutdown hands claims back
+without spending an attempt; `Run` returns instead of retrying a refusal;
+pulls never exceed free capacity; and `endpoints.list` shows the protocol
+only to executors. Mutations that fail tests: skipping the instance
+ownership check, removing completion replay, ignoring a lost claim, always
+allowing authorization, and not flagging a denial as terminal.
+
+**Behaviors worth knowing:**
+
+1. **An authorization check that cannot be answered is an `internal` error,**
+   not a denial: a revoked or expired session, or a store failure, comes back
+   as the director's generic error. The handler cannot tell a lapsed session
+   from a fault.
+2. **Replay detection is by state.** A repeated `fail` is confirmed if the
+   record is `pending` or `dead` at that same attempt; a repeated `abandon`
+   if it is `pending` or `cancelled`. An unrelated release that left the job
+   `pending` at that attempt would be indistinguishable, and is accepted as
+   harmless.
+3. **The attempt timeout is enforced on the executor** as a context
+   deadline; the director's claim lapse is independent of it.
+4. **`Run` gives up on a refusal** (`unauthorized`, `unknown_route`,
+   `version_unsupported`) and returns the error, so a misconfigured executor
+   fails loudly instead of polling forever. A transient failure is retried.
+5. **A job the director claimed but could not hand over** (released for
+   another executor, or ended) is only logged on the executor.
+6. **`jobs.execute` is registered by `jobsdirector.RegisterPermissions`,**
+   not by the SDK's seed step yet.
+7. **Heartbeat failures are logged and ignored,** so an executor cut off from
+   its director keeps running its handler until the claim lapses and the
+   next heartbeat or report says so.
+
 **Not built:** recurring jobs (and so the shared recurrence-math question);
-the executor and director node roles and the pushed-delivery path (both
-need the Router); housekeeping node roles; any per-owner limit or per-job
-event trail.
+the executor and director *node roles* (the governor-admitted runtime of
+`19`; the executor has only a plain concurrency limit); a director-to-
+executor wake-up hint; submitting through a director; housekeeping node
+roles; any per-owner limit or per-job event trail.
 
 ## Decisions made here
 
@@ -473,6 +604,10 @@ event trail.
    terminal.
 9. Delegation of a *subset* to a different principal, and chained
    delegation, remain deferred.
+10. A remote executor *pulls through a director* instead of being pushed to:
+    it only ever calls, the director is stateless between calls, authority
+    is mediated by the director, and results are requests so they can be
+    retried.
 
 ## Open questions
 

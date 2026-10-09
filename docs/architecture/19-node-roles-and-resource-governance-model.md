@@ -280,6 +280,15 @@ the mechanism and no background driver); a core node role could own that.
 
 ### Directing a task to another node
 
+**Revised for durable jobs.** When the task is a job, `20` now delivers it by
+*pull through a director*, not by the push below: the executor calls the
+director and asks for as much work as its governor can admit, so "rejected
+(busy / not offered)" never needs to happen, because nothing is sent that
+was not asked for. The consent rule below holds, more strongly. The push
+sequence stays as the design for a *non-durable* directed task (a duty a
+scheduler wants another node to carry out without a stored job), which is
+not built.
+
 ```mermaid
 sequenceDiagram
     participant S as Director's local scheduler

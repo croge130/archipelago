@@ -227,6 +227,53 @@ func sessionBinding(job structure.Job) json.RawMessage {
 	return b
 }
 
+// ErrClaimLost means the caller no longer holds the claim it names: the
+// job finished, was reclaimed under a newer attempt, was never claimed by
+// this actor, or does not exist. The reasons are deliberately not told
+// apart to a caller that has no right to know them.
+var ErrClaimLost = errors.New("jobsauth: the claim is no longer held")
+
+// Resume rebuilds the ClaimedJob an actor holds from the store alone, for a
+// node that serves a claim it did not make in this call: a director
+// answering a remote executor's heartbeat, completion or authorization
+// check. The caller names (job, attempt); the record must still be claimed,
+// under that attempt, by that actor. Nothing is kept between calls, so any
+// node over the same stores can resume any claim.
+//
+// On ErrClaimLost the returned ClaimedJob carries the current job record
+// only when it is this actor's own attempt (so a retried completion can tell
+// that the first one already landed); otherwise it is the zero value.
+func Resume(ctx context.Context, d Deps, actor, jobID uuid.UUID, attempt int) (ClaimedJob, error) {
+	job, found, err := d.JobsReader.GetJob(ctx, jobID)
+	if err != nil {
+		return ClaimedJob{}, fmt.Errorf("jobsauth: resume: %w", err)
+	}
+	if !found || job.ActorPrincipalID == nil || *job.ActorPrincipalID != actor || job.Attempt != attempt {
+		return ClaimedJob{}, ErrClaimLost
+	}
+	if job.State != structure.StateClaimed {
+		return ClaimedJob{Job: job}, ErrClaimLost
+	}
+	def, found, err := d.JobsReader.GetTaskDefinition(ctx, job.TaskKey)
+	if err != nil {
+		return ClaimedJob{}, fmt.Errorf("jobsauth: resume: %w", err)
+	}
+	if !found {
+		return ClaimedJob{}, fmt.Errorf("jobsauth: resume: %w", jobsFacade.ErrUnknownTask)
+	}
+	scope, err := jobsEvaluation.ResolveScope(def, job.Params)
+	if err != nil {
+		return ClaimedJob{}, fmt.Errorf("jobsauth: resume: %w", err)
+	}
+	return ClaimedJob{
+		Job:                  job,
+		ActorPrincipalID:     actor,
+		EffectivePrincipalID: effectivePrincipal(job, actor),
+		SessionID:            job.AssumedSessionID,
+		Scope:                scope,
+	}, nil
+}
+
 // Complete marks the claimed job succeeded and revokes its session. The
 // session is revoked even when the completion is refused — a refusal
 // means the claim was lost, and the session belongs to the lost attempt.

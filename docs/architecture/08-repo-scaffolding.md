@@ -114,6 +114,8 @@ archipelago/
   jobsauth/                   # jobs + gatehouse-core
   router/                     # transit + wire + logging; the dispatch layer (21)
   routerauth/                 # router + peerauth + gatehouse-core: route, permission and endpoint in one call
+  jobsexec/                   # router + logging: the executor side of remote jobs (20); no store, no gatehouse-core
+  jobsdirector/               # jobsexec + jobsauth + routerauth: the director side
   routere2e/                  # tests only: the router and its consumers over real mTLS websockets
   vitalsdefaults/             # vitals + policy
   traceagg/                   # router + wire + logging (not registry
