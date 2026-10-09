@@ -346,6 +346,81 @@ func TestEventsOverTheLimitAreDroppedAndCounted(t *testing.T) {
 	}
 }
 
+// One route serves a Push and a Call alike. The sender who must know
+// whether the work was accepted uses Call, which gets busy back and can
+// retry; the sender who does not uses Push, which is silently dropped and
+// only counted. That difference is the whole answer to "should events be
+// acknowledged" (21): they are not, and what must not be lost is a request.
+func TestASenderWhoNeedsToKnowUsesCallAndCanRetryBusy(t *testing.T) {
+	release := make(chan struct{})
+	var handled atomic.Int32
+	server := newRouter(Options{MaxInFlight: 1})
+	mustHandle(t, server, Route{Type: "demo.result", Handler: func(ctx context.Context, _ Request) (json.RawMessage, error) {
+		handled.Add(1)
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return nil, nil
+	}})
+	d, a := pair(t, newRouter(Options{}), server)
+
+	blocker := make(chan error, 1)
+	go func() { _, err := d.Call(ctxT(t), "demo.result", nil); blocker <- err }()
+	deadline := time.Now().Add(2 * time.Second)
+	for a.InFlight() < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	_, err := d.Call(ctxT(t), "demo.result", nil)
+	if !IsRetryable(err) {
+		t.Fatalf("over the limit: err = %v, want a retryable busy", err)
+	}
+	if err := d.Push(ctxT(t), "demo.result", nil); err != nil {
+		t.Fatalf("Push: %v", err) // accepted by the transport, then dropped by the router
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for a.DroppedEvents() < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if a.DroppedEvents() != 1 {
+		t.Fatalf("DroppedEvents = %d, want 1", a.DroppedEvents())
+	}
+
+	close(release)
+	if err := <-blocker; err != nil {
+		t.Fatalf("the first call: %v", err)
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for a.InFlight() > 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, err := d.Call(ctxT(t), "demo.result", nil); err != nil {
+		t.Fatalf("the retry once capacity returned: %v", err)
+	}
+	if n := handled.Load(); n != 2 {
+		t.Fatalf("handled %d, want 2: the busy call and the dropped event must never have run the handler", n)
+	}
+}
+
+func TestOnlyBusyIsRetryable(t *testing.T) {
+	for _, c := range []struct {
+		code  wire.ErrorCode
+		retry bool
+	}{
+		{wire.ErrBusy, true}, {wire.ErrUnauthorized, false}, {wire.ErrInvalid, false},
+		{wire.ErrUnknownRoute, false}, {wire.ErrVersionUnsupported, false},
+		{wire.ErrCancelled, false}, {wire.ErrInternal, false}, {wire.ErrHelloRequired, false},
+	} {
+		if got := IsRetryable(&RemoteError{Code: c.code}); got != c.retry {
+			t.Errorf("IsRetryable(%s) = %v, want %v", c.code, got, c.retry)
+		}
+	}
+	if IsRetryable(errors.New("local failure")) || IsRetryable(nil) {
+		t.Error("a non-remote error must not be reported retryable")
+	}
+}
+
 func TestCancellingACallCancelsTheRemoteHandler(t *testing.T) {
 	started := make(chan struct{})
 	cancelled := make(chan struct{})

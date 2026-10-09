@@ -317,7 +317,11 @@ surface would not be.
 3. **An executor with no store access** is *pushed to*: a node with access
    claims on its behalf and delivers the task over Transit as a
    `request`, answered with an `ack` or a rejection (busy, or kind not
-   offered), and later a `result` event. If the claiming node dies, the
+   offered), and later a `result` sent back as a **request**, not an event
+   (21, "Events are not acknowledged"): a result must not be silently
+   dropped by a busy receiver, so the executor sends it with `Call` and
+   retries on `busy`. A retry that lands after the first is harmless because
+   completion is fenced on the attempt number. If the claiming node dies, the
    claim expires and the job is retried; delivery stays at-least-once.
 4. **Cancellation** sets the state if pending; if already claimed it is
    cooperative — the executor learns on its next heartbeat and cancels the

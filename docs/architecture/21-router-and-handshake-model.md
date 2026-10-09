@@ -197,6 +197,41 @@ func (p *Peer) Push(ctx context.Context, typ string, payload json.RawMessage) er
 3. A caller's context deadline is a **duration relative to receipt on the
    far side**, never an absolute time, per `19`'s decision on clock skew.
 
+## Events are not acknowledged; what must not be lost is a request
+
+**Decision (settles the former open question about `ack`): the Router sends
+no acknowledgement for events, and none is added.** Nothing new was needed,
+because a route's handler serves a `request` and an `event` alike, and a
+request already gets everything an acknowledgement would carry: the handler
+ran and succeeded, or a coded error says why it did not.
+
+1. **`Push` is fire-and-forget by definition.** "Reliable" for the event
+   delivery class means the *transport* does not lose it. It does not mean the
+   receiver accepted it. A receiver over its in-flight limit drops the event
+   and counts it (`Peer.DroppedEvents`); an unauthorized event is refused in
+   the log only; a handler error on an event is logged only.
+2. **Anything that must not be lost is sent with `Call`.** It gets `busy`
+   when the receiver is full, `unauthorized` when refused, and a result when
+   it ran. Same route, same handler, the sender picks. Job results
+   (`jobs.result`) and anything else whose loss would matter use `Call`.
+3. **`busy` is the only code worth retrying** (`RemoteError.Retryable`,
+   `router.IsRetryable`): it says nothing about the request, only about the
+   receiver's load. Every other code is a verdict on the request or the
+   caller, a cancellation, or an internal failure whose retry safety only the
+   operation can judge. The router does not retry on its own: a blind retry of
+   a non-idempotent request is how work runs twice. That is why jobs fence
+   completion on the attempt number (`20`): a retried `jobs.result` that
+   arrives after the first landed is rejected as stale, not applied twice.
+4. **Why not an acknowledged event class.** It would be a request that
+   returns nothing, which `Call` already is, plus a second code path in the
+   dispatcher and a third delivery state for senders to reason about. The
+   cost it would remove is a sender having to write `Call` instead of `Push`
+   for the cases that matter, and that choice is the honest place for the
+   decision to live.
+5. **Consequence for consumers.** Diagnostics (`traceagg.entries`) stay
+   events: losing a batch under overload is acceptable and counted. A
+   consumer that cannot tolerate loss uses `Call` and retries on `busy`.
+
 ## Typed channels
 
 `ChannelOpts` gains `Type` and optional `Params`; `stream_open` carries
@@ -379,8 +414,8 @@ makes tests fail.
 4. **An event over the in-flight limit is dropped and counted** — it has no
    reply path to say `busy` on. `Peer.DroppedEvents` exposes the count.
    This is the honest consequence of a bounded limit with no
-   application-level event acknowledgement, and it is the strongest argument
-   for deciding open question 2 below.
+   application-level event acknowledgement, a trade accepted in "Events are
+   not acknowledged": what must not be lost is sent with `Call`.
 
 **Findings from moving the consumers:**
 
@@ -388,8 +423,8 @@ makes tests fail.
    on, so the end-to-end test can only assert the absence of an effect (the
    collector stays empty) and the refusal is visible in the log alone. This
    is the second consequence of events having no application-level
-   acknowledgement, after the in-flight drop above, and it makes question 2
-   below more pressing for anything that is not diagnostics.
+   acknowledgement, after the in-flight drop above. It is accepted: a sender
+   that needs to know uses `Call` (see "Events are not acknowledged").
 2. **`sso.ticket.issue` issues for the caller only.** The existing design
    left the request side open; a self-issuing route is the one shape with no
    delegation question in it. A Viewer-style login (a user authenticated by
@@ -430,11 +465,8 @@ makes tests fail.
 
 1. **Binding the in-flight limit to the node-wide governor** (`19`), and
    priority for inbound work.
-2. **Whether the Router sends `ack` for events.** The `ack` kind exists;
-   reliable delivery is the transport's job. But an event over the in-flight
-   limit is currently dropped and counted (see Status), which is lossy for a
-   delivery class documented as reliable; an application-level ack or a
-   blocking policy for events would fix that, and is undecided.
+2. **Event acknowledgement: settled** (see "Events are not acknowledged").
+   The `ack` kind stays in the wire vocabulary, unused by the router.
 3. **Protocol editions** beyond the cheap `RouteKey.Version` anticipation.
 4. **A second backend's effect.** The Router should be backend-agnostic by
    construction (it sees `Receiver` and `Session`), but the websocket
