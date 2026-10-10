@@ -114,6 +114,7 @@ archipelago/
   jobsauth/                   # jobs + gatehouse-core
   router/                     # transit + wire + logging; the dispatch layer (21)
   routerauth/                 # router + peerauth + gatehouse-core: route, permission and endpoint in one call
+  governor/                   # none of ours; node-wide budgets, priority, pressure, bounded admission (19)
   discovery/                  # none of ours; mDNS announce/browse of a peer's port and protocol range (18)
   jobsexec/                   # router + logging: the executor side of remote jobs (20); no store, no gatehouse-core
   jobsdirector/               # jobsexec + jobsauth + routerauth: the director side

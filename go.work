@@ -11,6 +11,7 @@ use (
 	./jobsauth
 	./jobsdirector
 	./jobsexec
+	./governor
 	./jobs
 	./logging
 	./mtls

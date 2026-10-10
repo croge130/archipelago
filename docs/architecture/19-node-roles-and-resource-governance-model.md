@@ -1,6 +1,8 @@
 # Adopting node roles, and bounding what they cost
 
-**Status: design draft. Nothing here is built.** Like
+**Status: design draft; the resource governor is built** (see "Status of the
+governor" near the end). The scheduler, the node role runtime and every
+integration are still design. Like
 [`18-peer-discovery-and-capabilities-model.md`](18-peer-discovery-and-capabilities-model.md),
 which this builds on, it pins vocabulary and boundaries first.
 
@@ -436,6 +438,70 @@ Following the project's module-per-dependency-unit rule:
 - **`sdk`**: `Config` gains a *shared* `Governor` handed to every `App` on
   the node, and a list of adopted node roles per `App`.
 
+## Status of the governor
+
+**Built: `governor`,** the zero-dependency node-wide governor and nothing
+above it. A `Governor` is created once per node from a node `Ceiling` and
+optional per-domain `Ceiling`s; a node role registers a `RoleSpec` (key,
+domain, requested `Limits`, priority) and gets back a `Role` whose `Limits`
+are what it will really run under and whose `Clamps` list every dimension a
+ceiling reduced (also logged at warn, never silent). `Role.Submit` offers a
+piece of `Work` and returns a `Ticket`. `ResolveBudget` turns an `Adoption`
+(a tier, "use the default", and/or explicit overrides) into the requested
+limits, and refuses an adoption that states nothing.
+
+1. **Three nested capacity levels,** node, domain share, node role. Work
+   starts only when all three have room, so two domains cannot each take
+   "their share" and together exceed the node's. Queue depth, rate and run
+   timeout are per node role, each capped by the ceilings.
+2. **Admission is best-first and does not block.** Highest effective
+   priority, then oldest. Work that is held back (a full level, the role's
+   rate, pressure) never blocks work behind it that can run.
+3. **The aging rule (an open question, now settled):** waiting work counts as
+   one level more urgent per `AgeStep` (default 30s), never above
+   `important`, and work already at `important` or `critical` does not age.
+   Aging orders work **only**. Whether work may start under pressure is
+   judged on its base priority, otherwise waiting would defeat the cutoff;
+   a test pins that. Whether any kind may be marked non-sheddable is still
+   open.
+4. **Overflow is per piece of work:** `Drop` (forget it), `Defer` (not now;
+   ask again), or `Coalesce` (merge into an identical waiting piece by key and
+   hand back *that* piece's ticket, raising its priority if the new trigger is
+   more urgent; with nothing to merge into and no room it drops). A queue
+   depth of zero means "start at once or be shed".
+5. **Pressure holds, it does not shed or kill.** At `elevated`, background is
+   not started; at `high`, nothing below `important`. Held work stays queued
+   (and counts against the queue depth) and runs when the pressure drops.
+   Running work is never touched.
+6. **No preemption and no memory accounting,** as designed. A run is bounded
+   by its context deadline, a panic in a duty is a failed result, and
+   `Close` sheds the queue, cancels the running work's context and waits.
+7. **Clamping is per-dimension minimum,** done in the governor itself. This
+   departs from the earlier sketch of using `typeconstraints.Set.Clamp`: the
+   governor is zero-dependency, the clamp is only a minimum, and the policy
+   side (resolving what a domain *asks* for with `typeconstraints`) belongs
+   to the `noderoles` + Policy integration, which hands the result in as
+   `Requested`.
+8. **`Stats()`** gives running and waiting counts and cumulative counters per
+   node role (submitted, started, completed, failed, cancelled, coalesced, shed
+   by reason) for the Vitals integration to report. Nothing reports them yet.
+
+**Tested** with real goroutines under the race detector: no level is ever
+over its cap; priority and age ordering; pressure holding work and not
+killing it, including that aged work stays held; each overflow behaviour;
+rate spacing without blocking other roles; run timeouts; panic recovery;
+close and unregister; and a randomized stress run over several roles and
+domains with pressure changing, which also checks that every ticket
+resolves and that the counters account for every submission. Removing the
+node ceiling, the domain share, the queue depth, priority ordering, the rate
+limit, or the base-priority rule for pressure each fails a test.
+
+**Not built:** the `scheduler`, `noderoles` runner, the Policy, Gatehouse-core,
+Vitals, registry and jobs integrations, SDK `Config` carrying a shared
+governor, and executor admission through the governor (`jobsexec` still has
+only a plain concurrency limit). The governor has no clock injection, so its
+rate and aging tests use short real durations.
+
 ## Decisions so far
 
 1. **Node roles are non-unique by default**, and exclusive node roles are permitted
@@ -500,8 +566,8 @@ Following the project's module-per-dependency-unit rule:
    side (grants a node role's principal needs, Policy values that configure a
    node role, recurring job definitions) is a natural extension of what HCL
    is already used for. See the note added to `07`.
-2. **The aging rule for priority**, and whether any task kind may be
-   marked non-sheddable.
+2. **Whether any task kind may be marked non-sheddable.** (The aging rule is
+   settled; see "Status of the governor".)
 3. **The job system's own design** — drafted in
    [`20-jobs-model.md`](20-jobs-model.md); its open questions are tracked
    there.
