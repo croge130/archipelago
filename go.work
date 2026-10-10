@@ -19,6 +19,7 @@ use (
 	./policy
 	./recurrence
 	./registry
+	./scheduler
 	./router
 	./routerauth
 	./routere2e

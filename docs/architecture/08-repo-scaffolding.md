@@ -114,6 +114,7 @@ archipelago/
   jobsauth/                   # jobs + gatehouse-core
   router/                     # transit + wire + logging; the dispatch layer (21)
   routerauth/                 # router + peerauth + gatehouse-core: route, permission and endpoint in one call
+  scheduler/                  # recurrence; when a duty is due: overlap, catch-up, jitter, events; offers runs to a Dispatcher (19)
   recurrence/                 # none of ours (cron parser only); next-occurrence math shared by scheduler and recurring jobs (19, 20)
   governor/                   # none of ours; node-wide budgets, priority, pressure, bounded admission (19)
   discovery/                  # none of ours; mDNS announce/browse of a peer's port and protocol range (18)

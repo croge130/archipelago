@@ -1,8 +1,8 @@
 # Adopting node roles, and bounding what they cost
 
-**Status: design draft; the resource governor is built** (see "Status of the
-governor" near the end). The scheduler, the node role runtime and every
-integration are still design. Like
+**Status: design draft; the resource governor, `recurrence` and the scheduler
+are built** (see the "Status of..." sections near the end). The node role
+runtime and every integration are still design. Like
 [`18-peer-discovery-and-capabilities-model.md`](18-peer-discovery-and-capabilities-model.md),
 which this builds on, it pins vocabulary and boundaries first.
 
@@ -550,6 +550,61 @@ dependency is the cron *parser*.
    guard, choosing the later of a repeated time, ending a gap by shifting
    instead of at its end, allowing zone prefixes, or removing the panic
    guard each fails a test.
+
+## Status of the scheduler
+
+**Built: `scheduler`,** the in-process "when is a duty due" layer, over
+`recurrence`. A `Duty` has a role and name, an optional `recurrence.Schedule`
+and `Events`, `Jitter`, an overlap policy, a catch-up policy with a bound, and
+a `Run`. The scheduler never runs a duty itself: it builds the function for one
+execution and offers it to a `Dispatcher`, which answers *accepted*, *dropped*
+or *deferred* and, if accepted, a `Done` channel. The adapter that turns a
+governor `Role.Submit` into a `Dispatcher` is the `noderoles` runner's job, so
+the scheduler needs no governor and a test needs only a function.
+
+1. **Triggers:** interval, calendar and one-shot all arrive as a
+   `recurrence.Schedule`; events are named (`EventStart` is emitted by
+   `Start`, others by `Emit`, for an integration to raise when a lease is
+   acquired or a Policy value changes).
+2. **Jitter delays the run, never the slot.** The next occurrence is computed
+   from the nominal slot, so jitter does not accumulate; a test pins that.
+3. **Overlap** (previous run still going): `Skip`, `QueueOne` (remember the
+   *latest* due occurrence and run it when the previous ends) or `Allow`
+   (the dispatcher's own bound is the limit). It applies to event runs too.
+4. **Catch-up happens at `Start`,** against a `Record` of the last slot each
+   duty *finished*: `Skip`, `Once` (one run, marked as a catch-up and carrying
+   how many were missed) or `Each` (the oldest missed, up to a bound, one
+   after another and never together). A duty that has never run has nothing to
+   catch up. The default `Record` is in memory, which gives a node with no
+   storage skip semantics, as designed.
+5. **The record is written when a run finishes, not when it is offered.** A
+   crash mid-run leaves the slot unrecorded, so it is caught up; that is the
+   at-least-once the design already asks of duties. Dropped, deferred and
+   shed runs are never recorded.
+6. **A run that arrives too late collapses, it does not burst.** If the
+   process was suspended past several slots, the first fires and the rest are
+   counted as `MissedSlots`; catch-up policy applies only at `Start`.
+7. **A deferred run is offered again** after `DeferRetry` (default one
+   second), carrying its original slot and an attempt count, and stops being
+   re-offered once the next occurrence is due, which supersedes it.
+8. **Time is injected** (`Clock`); `ManualClock` is exported for tests, with
+   `Advance` and `Jump` (move time without running timers, to make timers
+   late).
+
+**Tested** with a manual clock and a recording dispatcher, 20 runs under the
+race detector: each slot fires and nothing between; calendar slots in a real
+zone; jitter; all three overlap policies and which occurrence is queued; all
+three catch-up policies including the bound and the one-at-a-time rule;
+recording on finish and not on offer or drop; deferral and its bound; events;
+late timers; one-shots; add, remove and stop. Ignoring overlap, queueing the
+first instead of the latest, recording at offer time, letting jitter
+accumulate, ignoring the catch-up bound, and never retrying a deferral each
+fail a test.
+
+**Not built:** the governor adapter and everything else in `noderoles`; a
+durable `Record`; a shutdown event; and the Policy integration that lets a
+domain override a schedule within the node role's declared floor (the floor is
+a `typeconstraints` bound applied there, not in the scheduler).
 
 ## Decisions so far
 
