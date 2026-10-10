@@ -4,7 +4,8 @@
 vocabulary, `transit`'s receive interface and typed channels, the
 `router` base itself, `routerauth`, and the existing consumers (`traceagg`,
 `registry`, `sso`) on routes, and the remote-executor routes of `20` — see
-"Status" near the end. Not built: the discovery module (`18`). It resolves the gap that
+"Status" near the end. Not built: the connection process that tries
+discovery's candidates (`18`). It resolves the gap that
 [`11-transit-model.md`](11-transit-model.md) deliberately left ("a real
 router sitting above `Backend.Accept` isn't designed here") and that
 `15`, `16`, `18`, `19` and `20` each name as the thing they are waiting

@@ -1,10 +1,12 @@
 # Peer discovery, domains, and what a peer offers
 
-**Status: design draft. Nothing here is built, and nothing should be built
-from it until the open questions at the end are settled.** It was written
-to pin the vocabulary and the boundaries before any implementation, in
-the order the conversation that produced it reached them. Where it
-revises an earlier statement, it says so.
+**Status: design draft, with one part built: the multicast bootstrap tier
+(`discovery`, below).** Everything else here (node role, label and
+capability claims, the per-domain connection process, the label type) is
+still design and should not be built until the open questions at the end are
+settled. The document was written to pin the vocabulary and the boundaries
+before any implementation, in the order the conversation that produced it
+reached them. Where it revises an earlier statement, it says so.
 
 ## Where this sits
 
@@ -175,14 +177,39 @@ is established by mTLS and the endpoint query afterwards.
 database, so a node with no direct database access (`17`) can announce and
 discover. It would be a zero-dependency module, like `alias`.
 
-**Likely carrier — to verify before any code.** DNS-SD over mDNS
-(RFC 6762/6763), service `_archipelago._tcp`, with the version in TXT and
-the port in SRV, rather than a custom packet. Things to check against the
-real libraries first, per this project's usual discipline: mDNS is
-link-local only and commonly blocked in cloud VPCs and Kubernetes pod
-networks (acceptable for an optional fallback); TXT records are meant to
-stay small; and the practical differences between `hashicorp/mdns` and
-`grandcat/zeroconf`.
+**Carrier: DNS-SD over mDNS (RFC 6762/6763), service `_archipelago._tcp`,
+the port in SRV and the protocol range in one TXT key** (`proto=<min>-<max>`,
+the same range the router's handshake negotiates), rather than a custom
+packet. mDNS is link-local only and commonly blocked in cloud VPCs and
+Kubernetes pod networks, which is acceptable for an optional fallback.
+
+**Verified against the real libraries before building,** on a machine with
+no IPv6 and a hostname that does not resolve:
+
+1. **`hashicorp/mdns` v1.0.7** (released 2026-06, maintained) announced and
+   was found. It needs explicit addresses: with none it resolves the
+   hostname and fails if that does not resolve. It logs and carries on
+   when IPv6 is unavailable.
+2. **`grandcat/zeroconf` v1.0.0** (last release 2020) also worked, but its
+   resolver refuses to start at all without IPv6 unless told IPv4-only, and
+   its announcer has no such option.
+3. **Chosen: `hashicorp/mdns`.** It is maintained, takes explicit
+   addresses, and a failure to listen on IPv6 is a log line instead of an
+   error. Its cost is a `go 1.25` requirement (the workspace is already
+   there) and `miekg/dns`.
+4. **Its context handling is wrong for us.** `QueryContext` closes its
+   sockets on cancellation but the query loop only ends on its own timer, so
+   a 300ms context with a 5s timeout returned after 5s (confirmed in
+   source). `discovery.Browse` therefore runs each query in a goroutine it
+   can walk away from, and bounds each one by its share of the window.
+5. **A query is one packet and one wait.** Browse asks several times within
+   its window and merges, so one lost packet does not hide a peer.
+6. **An entry is delivered only when complete** (SRV, TXT and an address), so
+   an announcement without addresses is invisible; `Announce` always
+   supplies some. The library drops a result if the receiver's channel is
+   full, so Browse reads from a buffered channel continuously.
+7. **There is no deregistration:** closing an announcer just stops it
+   answering, and a later browse does not find it.
 
 ## The connection process, per domain
 
@@ -251,9 +278,43 @@ design should be done together.
 8. **The SWIM-style gossip fallback** `03` names: relation to this tier
    once membership beyond bootstrap is wanted.
 
+## Status of the discovery module
+
+**Built: `discovery`,** the announce and browse halves of this tier and
+nothing else. `Announce` publishes a listener (port, protocol range) under a
+random opaque instance name; `Browse` returns the distinct well-formed
+candidates heard within a window, with `Candidate.AddrPorts` and
+`Candidate.Speaks(min, max)`. It depends on no other Archipelago module.
+
+1. **What it announces is exactly the protocol range.** A test reads the raw
+   answer and requires the TXT to be only `proto=<min>-<max>` and the
+   instance name to be random, so a passive observer learns nothing about a
+   node's domains, node roles or labels.
+2. **Everything heard is a hint, and Browse is built for a hostile link.**
+   It discards entries with no or malformed `proto`, an impossible port, no
+   usable address (unspecified, multicast, broadcast), the wrong service, or
+   an oversized or empty instance name; looks at no more than eight TXT
+   fields of 255 bytes; keeps at most 64 candidates and eight addresses per
+   candidate; and lets the first sighting of an instance fix its port and
+   protocol range, so a later forgery cannot rewrite it. Unknown TXT keys
+   (from a newer peer) are ignored.
+3. **Tested** over real multicast on the local machine, skipped where
+   multicast does not work: a single announcement, several listeners on one
+   node, forged and malformed announcements next to a good one, a flood
+   against the candidate limit, a closed announcer, `Found` called once
+   per candidate across repeated queries, and Browse returning when its
+   context ends instead of when the window does. Accepting any `proto`
+   value, removing the candidate cap, or waiting out the library's timer
+   instead of the context each fail a test.
+
+**Not built:** trying candidates with a domain's identity and caching the
+negatives (that is the connection process, which needs the domain identity
+form of open question 6); an opt-in hint of trusted-root hashes; any use of
+the SWIM-style gossip fallback; and the label type.
+
 ## Suggested order
 
 1. Settle this doc (the open questions above).
-2. Router + `hello`/versioning design, domain-aware.
-3. Zero-dependency discovery module (announce/query only).
+2. Router + `hello`/versioning design, domain-aware. *(Done: `21`.)*
+3. Zero-dependency discovery module (announce/query only). *(Done.)*
 4. The label type, if selection by label turns out to be needed.

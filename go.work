@@ -6,6 +6,7 @@ use (
 	./certcred
 	./certstore
 	./db
+	./discovery
 	./gatehouse-core
 	./jobsauth
 	./jobsdirector
