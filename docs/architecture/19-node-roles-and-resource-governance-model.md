@@ -478,9 +478,12 @@ limits, and refuses an adoption that states nothing.
    `Close` sheds the queue, cancels the running work's context and waits.
 7. **Clamping is a per-dimension minimum in the governor itself.** This
    departs from the earlier sketch of using `typeconstraints.Set.Clamp`, and
-   the reason is the shape of the data, not a wish to avoid dependencies:
-   `Limits` and `Ceiling` are permanently fixed types (a count, a depth, a
-   rate, a duration), so `typedvalue` would add machinery and nothing else.
+   the reason is the shape of the data: `Limits` and `Ceiling` are
+   permanently fixed types (a count, a depth, a rate, a duration), so
+   `typedvalue` would add machinery and nothing else. (The governor is also
+   kept free of other bases because it should be usable on a node that adopts
+   nothing else, but `typedvalue` would not have been a dependency worth
+   avoiding on that ground.)
    `typedvalue` and `typeconstraints` are the intended type system wherever
    values are complex or dynamic, and this design still uses them there: the
    `noderoles` + Policy integration resolves what a domain *asks for*, which

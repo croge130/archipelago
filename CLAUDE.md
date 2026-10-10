@@ -19,7 +19,12 @@
 
 ## Design rules
 
-1. Depending on `typedvalue` or `typeconstraints` is fine, and is the intended
-   type system wherever values are complex or dynamic (Policy-held settings,
-   definitions that are data). For a permanently fixed type, plain Go types
-   are fine. Choose by the shape of the data, not by avoiding a dependency.
+1. Depending on `typedvalue` or `typeconstraints` is fine and is never a
+   reason to hand-roll something. They are the intended type system wherever
+   values are complex or dynamic (Policy-held settings, definitions that are
+   data). For a permanently fixed type, plain Go types are fine too.
+2. Keeping a dependency out is a legitimate goal for systems that should stay
+   optional or usable on their own: a node with no database access should not
+   have to carry Gatehouse-core to run jobs, and discovery needs nothing of
+   ours. Weigh a dependency by whether the system should be usable without it,
+   not by a blanket preference either way.
