@@ -17,6 +17,7 @@ use (
 	./mtls
 	./peerauth
 	./policy
+	./recurrence
 	./registry
 	./router
 	./routerauth

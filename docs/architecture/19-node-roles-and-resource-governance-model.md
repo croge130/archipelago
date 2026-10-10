@@ -510,6 +510,47 @@ governor, and executor admission through the governor (`jobsexec` still has
 only a plain concurrency limit). The governor has no clock injection, so its
 rate and aging tests use short real durations.
 
+## Status of recurrence
+
+**Built: `recurrence`,** the shared "next occurrence after t" answer for the
+scheduler and for recurring jobs (`20`). `Every(d, anchor)` is real elapsed
+time, anchored so a restart does not shift it; `Once(at)`; `Calendar(expr,
+loc)` matches a cron expression on the wall clock of a location; `Between`
+lists what fell in a window, for catch-up. It is a pure module whose only
+dependency is the cron *parser*.
+
+1. **The library was chosen by trying it.** `go-cron` needs Go 1.26 and a
+   1.27 toolchain, which this workspace cannot use. Of `robfig/cron` v3.0.1
+   (unmaintained since 2020) and `gronx`: on a daily job across the fall-back
+   night one fires it twice and one once; on an hourly job across it one
+   fires both 01:00s and one drops one; both skip a 02:30 job on the
+   spring-forward day. Since the two disagree on exactly the case that
+   matters, `recurrence` defines the behaviour itself and uses `robfig`'s
+   parser only for matching in civil time, where there is no daylight saving.
+2. **The rule:** a civil time that exists once is that instant; one that
+   happens twice (clocks back) fires once, at the first occurrence; one that
+   never happens (clocks forward) fires at the first instant after the gap,
+   and several in one gap are one instant. A daily calendar schedule
+   therefore fires exactly once on every day it matches, including transition
+   days, in every zone tested (including a 30-minute shift, the southern
+   hemisphere and zones without DST). The cost, stated in the package doc: an
+   hourly wall-clock schedule has a two-hour gap on a fall-back night, and
+   `Every` is the tool for "each N hours of real time".
+3. **`Next` is strictly increasing,** including when asked from inside a
+   repeated hour, where mapping to the first occurrence would otherwise
+   return something already past.
+4. **Hardening against the library:** it panics on `TZ=` / `CRON_TZ=`
+   input, so those prefixes are rejected up front and the parse is wrapped
+   in a recover; it accepts empty list elements (`1,,2`), which are
+   rejected here; `@every` is refused in favour of `Every`.
+5. **Tested** against real zones (New York, Sydney, Lord Howe, Kolkata, London,
+   St John's, UTC): the transition days, a year of daily occurrences in each
+   zone (365, one per day, strictly increasing), and `Next` from every
+   quarter hour of both New York transition days. Removing the monotonic
+   guard, choosing the later of a repeated time, ending a gap by shifting
+   instead of at its end, allowing zone prefixes, or removing the panic
+   guard each fails a test.
+
 ## Decisions so far
 
 1. **Node roles are non-unique by default**, and exclusive node roles are permitted

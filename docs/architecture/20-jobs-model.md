@@ -621,12 +621,10 @@ roles; any per-owner limit or per-job event trail.
    `19`. Not designed.
 2. **A per-job event trail.** Lighthouse kept a `job_events` table for
    debugging; here only logs and Vitals exist.
-3. **Where recurrence math lives.** `scheduler` (the in-process one) and
-   `jobs` both need "next occurrence after t." A small shared zero-dependency
-   module would avoid duplicating it and avoid one base importing another.
-   For calendar expressions a library such as `robfig/cron` is the obvious
-   candidate, to be checked against its real behavior before anything is
-   chosen.
+3. **Where recurrence math lives: resolved.** It is the `recurrence`
+   module (see `19`, "Status of recurrence"), shared by the scheduler and
+   by recurring jobs; neither base imports the other. Recurring jobs
+   still need to be built on it.
 4. **Reserved-namespace check — resolved for now.** `jobs` cannot import
    Gatehouse-core's unexported list, so `facade.RegisterTaskDefinition`
    takes the list as an option (default `jobs`, `archipelago`) and an
