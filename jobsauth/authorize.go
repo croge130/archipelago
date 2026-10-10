@@ -17,6 +17,13 @@ const (
 	PermissionClaim  = "jobs.claim"
 	PermissionCancel = "jobs.cancel"
 
+	// PermissionExecute is a global permission, not a queue-scoped one: it
+	// gates the remote-executor protocol (20, "Remote executors") so that
+	// only peers meant to be executors are offered or served its routes. It
+	// does not replace PermissionClaim, which still decides which queues an
+	// executor may pull from.
+	PermissionExecute = "jobs.execute"
+
 	// ContextTypeQueue is the Gatehouse-core context type this package
 	// scopes permissions to; a context's ID under it is a queue key.
 	ContextTypeQueue = "jobs.queue"
@@ -53,7 +60,7 @@ func (d Deps) needWriters(op string) error {
 	return nil
 }
 
-// RegisterPermissions registers this package's four permission keys as
+// RegisterPermissions registers this package's five permission keys as
 // standard-authority, wildcard-includable definitions — wildcard-
 // includable so a single "jobs.*" grant on a queue covers all of them,
 // the same default every other key in this design uses.
@@ -61,7 +68,7 @@ func (d Deps) needWriters(op string) error {
 // safe on every startup.
 func RegisterPermissions(ctx context.Context, reader gatehouseFacade.Reader, writer gatehouseFacade.Writer) error {
 	opts := gatehouseFacade.RegisterPermissionOptions{AllowReservedNamespace: true}
-	for _, key := range []string{PermissionSubmit, PermissionRead, PermissionClaim, PermissionCancel} {
+	for _, key := range []string{PermissionSubmit, PermissionRead, PermissionClaim, PermissionCancel, PermissionExecute} {
 		def := gatehouseStructure.PermissionDefinition{
 			PermissionKey:          key,
 			RequiredAuthorityLevel: gatehouseStructure.AuthorityLevelStandard,

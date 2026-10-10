@@ -56,7 +56,6 @@ func TestAStorelessExecutorRunsAnOwnersJobOverRealMTLS(t *testing.T) {
 	for _, f := range []func() error{
 		func() error { return facade.RegisterAssumePermissions(ctx, n.reader, n.writer) },
 		func() error { return jobsauth.RegisterPermissions(ctx, n.reader, n.writer) },
-		func() error { return jobsdirector.RegisterPermissions(ctx, n.reader, n.writer) },
 	} {
 		if err := f(); err != nil {
 			t.Fatal(err)

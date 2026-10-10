@@ -103,7 +103,6 @@ func setup(t *testing.T) *fx {
 			return gatehouseFacade.RegisterAssumePermissions(ctx, d.GatehouseReader, d.GatehouseWriter)
 		},
 		func() error { return jobsauth.RegisterPermissions(ctx, d.GatehouseReader, d.GatehouseWriter) },
-		func() error { return RegisterPermissions(ctx, d.GatehouseReader, d.GatehouseWriter) },
 	} {
 		if err := reg(); err != nil {
 			t.Fatal(err)

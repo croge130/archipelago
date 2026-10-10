@@ -87,9 +87,13 @@ func TestFullAppSeedsIdempotentlyAndComposesAcrossModules(t *testing.T) {
 		}
 	}
 
-	// Seeding registered Gatehouse-core's own assume permissions.
+	// Seeding registered Gatehouse-core's own assume permissions and all
+	// five jobs permissions, including the one that gates remote executors.
 	check := newApp(t, stores, allModes)
-	for _, key := range []string{gatehouseFacade.PermissionAssumeCause, gatehouseFacade.PermissionAssumeExecute} {
+	for _, key := range []string{
+		gatehouseFacade.PermissionAssumeCause, gatehouseFacade.PermissionAssumeExecute,
+		jobsauth.PermissionSubmit, jobsauth.PermissionRead, jobsauth.PermissionClaim, jobsauth.PermissionCancel, jobsauth.PermissionExecute,
+	} {
 		if _, found, err := check.Gatehouse.Reader.GetPermissionDefinition(ctx, key); err != nil || !found {
 			t.Fatalf("%s not registered by Seed: found=%v err=%v", key, found, err)
 		}

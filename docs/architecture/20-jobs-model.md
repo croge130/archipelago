@@ -352,8 +352,10 @@ All of these are `Call`s from the executor to the director, over a router
    ID in the payload is checked: the registered instance must belong to the
    caller's principal.
 2. **A gate before the queue checks.** The routes require a global
-   `jobs.execute` permission, which exists so that `endpoints.list` shows the
-   executor protocol only to peers meant to use it. It does not replace the
+   `jobs.execute` permission (registered with the other jobs permissions by
+   `jobsauth.RegisterPermissions`, and so by the SDK's seed step), which
+   exists so that `endpoints.list` shows the executor protocol only to peers
+   meant to use it. It does not replace the
    per-queue `jobs.claim` check, which still decides what may be pulled.
 3. **The director is stateless between calls.** Every call after the pull
    names `(job, attempt)`. `jobsauth.Resume` rebuilds the claim from the store
@@ -474,8 +476,9 @@ conflicts on different parameters.
 **Built (`jobsauth`):**
 
 1. **Queue-context permissions** — `jobs.submit`, `jobs.read`, `jobs.claim`,
-   `jobs.cancel` on the context type `jobs.queue`; the owner can always read
-   and cancel their own jobs. `jobs` joined Gatehouse-core's reserved
+   `jobs.cancel` on the context type `jobs.queue`, plus the global
+   `jobs.execute` that gates the remote-executor protocol; the owner can
+   always read and cancel their own jobs. `jobs` joined Gatehouse-core's reserved
    namespaces.
 2. **`Submit`** checks the submit permission on the queue and, for assumed
    authority, that the requester may cause work as C.
@@ -573,8 +576,10 @@ allowing authorization, and not flagging a denial as terminal.
    fails loudly instead of polling forever. A transient failure is retried.
 5. **A job the director claimed but could not hand over** (released for
    another executor, or ended) is only logged on the executor.
-6. **`jobs.execute` is registered by `jobsdirector.RegisterPermissions`,**
-   not by the SDK's seed step yet.
+6. **`jobs.execute` is registered by `jobsauth.RegisterPermissions`,** next
+   to the four queue permissions, so the SDK's seed step covers it (a seeded
+   app is tested to hold all five). `jobsdirector.PermissionExecute` is the
+   same constant.
 7. **Heartbeat failures are logged and ignored,** so an executor cut off from
    its director keeps running its handler until the claim lapses and the
    next heartbeat or report says so.

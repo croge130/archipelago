@@ -203,7 +203,7 @@ func TestRegisterPermissionsIsIdempotent(t *testing.T) {
 	if err := RegisterPermissions(ctxT(t), f.d.GatehouseReader, f.d.GatehouseWriter); err != nil {
 		t.Fatalf("second RegisterPermissions: %v", err)
 	}
-	for _, key := range []string{PermissionSubmit, PermissionRead, PermissionClaim, PermissionCancel} {
+	for _, key := range []string{PermissionSubmit, PermissionRead, PermissionClaim, PermissionCancel, PermissionExecute} {
 		if _, found, err := f.d.GatehouseReader.GetPermissionDefinition(ctxT(t), key); err != nil || !found {
 			t.Errorf("%s not registered: found=%v err=%v", key, found, err)
 		}

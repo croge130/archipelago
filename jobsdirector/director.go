@@ -9,8 +9,6 @@ import (
 	"time"
 
 	"github.com/croge130/archipelago/gatehouse-core/evaluation"
-	gatehouseFacade "github.com/croge130/archipelago/gatehouse-core/facade"
-	gatehouseStructure "github.com/croge130/archipelago/gatehouse-core/structure"
 	"github.com/croge130/archipelago/jobs/structure"
 	"github.com/croge130/archipelago/jobsauth"
 	"github.com/croge130/archipelago/jobsexec"
@@ -22,23 +20,9 @@ import (
 )
 
 // PermissionExecute is the global permission an executor holds to use the
-// protocol at all. It gates the routes (and so their appearance in
-// endpoints.list); the per-queue jobs.claim check still decides what may be
-// pulled.
-const PermissionExecute = "jobs.execute"
-
-// RegisterPermissions registers PermissionExecute. Idempotent.
-func RegisterPermissions(ctx context.Context, reader gatehouseFacade.Reader, writer gatehouseFacade.Writer) error {
-	err := gatehouseFacade.RegisterPermission(ctx, reader, writer, gatehouseStructure.PermissionDefinition{
-		PermissionKey:          PermissionExecute,
-		RequiredAuthorityLevel: gatehouseStructure.AuthorityLevelStandard,
-		WildcardIncludable:     true,
-	}, gatehouseFacade.RegisterPermissionOptions{AllowReservedNamespace: true})
-	if err != nil {
-		return fmt.Errorf("jobsdirector: register permissions: %w", err)
-	}
-	return nil
-}
+// protocol at all. It is registered by jobsauth.RegisterPermissions with the
+// other jobs permissions (and so by the SDK's seed step).
+const PermissionExecute = jobsauth.PermissionExecute
 
 // Config configures a Director.
 type Config struct {
