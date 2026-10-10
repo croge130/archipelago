@@ -16,3 +16,10 @@
    write bare "role" for it.
 3. Within a node role, a "duty" is one unit of automatic work; a "task" is
    one execution of it, and a "job" is a task made durable by the job system.
+
+## Design rules
+
+1. Depending on `typedvalue` or `typeconstraints` is fine, and is the intended
+   type system wherever values are complex or dynamic (Policy-held settings,
+   definitions that are data). For a permanently fixed type, plain Go types
+   are fine. Choose by the shape of the data, not by avoiding a dependency.

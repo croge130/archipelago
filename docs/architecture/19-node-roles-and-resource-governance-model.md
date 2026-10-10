@@ -476,12 +476,17 @@ limits, and refuses an adoption that states nothing.
 6. **No preemption and no memory accounting,** as designed. A run is bounded
    by its context deadline, a panic in a duty is a failed result, and
    `Close` sheds the queue, cancels the running work's context and waits.
-7. **Clamping is per-dimension minimum,** done in the governor itself. This
-   departs from the earlier sketch of using `typeconstraints.Set.Clamp`: the
-   governor is zero-dependency, the clamp is only a minimum, and the policy
-   side (resolving what a domain *asks* for with `typeconstraints`) belongs
-   to the `noderoles` + Policy integration, which hands the result in as
-   `Requested`.
+7. **Clamping is a per-dimension minimum in the governor itself.** This
+   departs from the earlier sketch of using `typeconstraints.Set.Clamp`, and
+   the reason is the shape of the data, not a wish to avoid dependencies:
+   `Limits` and `Ceiling` are permanently fixed types (a count, a depth, a
+   rate, a duration), so `typedvalue` would add machinery and nothing else.
+   `typedvalue` and `typeconstraints` are the intended type system wherever
+   values are complex or dynamic, and this design still uses them there: the
+   `noderoles` + Policy integration resolves what a domain *asks for*, which
+   is Policy-held and dynamic, with `typedvalue` and `typeconstraints`, then
+   hands the result in as `Requested`. The same applies to tier tables and
+   floors on schedules when those are built.
 8. **`Stats()`** gives running and waiting counts and cumulative counters per
    node role (submitted, started, completed, failed, cancelled, coalesced, shed
    by reason) for the Vitals integration to report. Nothing reports them yet.
