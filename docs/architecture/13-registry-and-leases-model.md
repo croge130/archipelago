@@ -157,6 +157,16 @@ would be building infrastructure for a need nothing in this codebase has
 yet — the same restraint `03-multi-instance-and-suites.md` already
 applied to CRDTs and consensus, just at a smaller scale.
 
+## The background driver now exists
+
+The mechanism above deliberately left heartbeating and lease renewal to the
+caller. Both now have a driver, as node roles a node adopts
+(`registrynoderole`, [`19`](19-node-roles-and-resource-governance-model.md)):
+Membership registers, heartbeats, re-registers a lost row and deregisters, and
+`LeaseGate` keeps a lease renewed and presents it as the Gate an exclusive node
+role needs. Nothing about the registry changed; a caller that wants to drive
+it by hand still can.
+
 ## What the `registry` integration package actually provides
 
 ```go

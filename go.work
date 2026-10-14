@@ -16,9 +16,11 @@ use (
 	./logging
 	./mtls
 	./peerauth
+	./noderoles
 	./policy
 	./recurrence
 	./registry
+	./registrynoderole
 	./scheduler
 	./router
 	./routerauth

@@ -1,8 +1,9 @@
 # Adopting node roles, and bounding what they cost
 
-**Status: design draft; the resource governor, `recurrence` and the scheduler
-are built** (see the "Status of..." sections near the end). The node role
-runtime and every integration are still design. Like
+**Status: design draft; the resource governor, `recurrence`, the scheduler,
+the node role runtime and the registry membership node role are built** (see
+the "Status of..." sections near the end). The Policy, Gatehouse-core and
+Vitals integrations and the SDK wiring are still design. Like
 [`18-peer-discovery-and-capabilities-model.md`](18-peer-discovery-and-capabilities-model.md),
 which this builds on, it pins vocabulary and boundaries first.
 
@@ -606,6 +607,90 @@ durable `Record`; a shutdown event; and the Policy integration that lets a
 domain override a schedule within the node role's declared floor (the floor is
 a `typeconstraints` bound applied there, not in the scheduler).
 
+## Status of the node role runtime
+
+**Built: `noderoles`,** which imports only the governor, the scheduler and
+`recurrence`. A `Definition` is a node role (key, duties, tier table and
+default budget, priority, the permissions its duties need, optional exclusivity,
+`Setup` and `Teardown`); an `Adoption` is the node's decision (a stated budget,
+an optional priority, per-duty schedule overrides, a `Gate` for an exclusive
+node role, an `Authorize` function). `Runtime.Adopt` does, in order: validate,
+resolve the budget (`governor.ResolveBudget`, so nothing is adopted without
+stating one), authorize, register with the governor (which applies the domain
+share and node ceiling and reports every clamp on the returned `Adopted`),
+`Setup`, and schedule the duties. If any step fails nothing is left behind and
+no other node role is touched; a test adopts a good node role, fails a bad one
+three ways, and then adopts the bad one properly.
+
+1. **The scheduler and governor are joined by one adapter** (`Runtime.dispatch`
+   is the scheduler's `Dispatcher`): a due run becomes governed work, a
+   governor shed becomes *dropped* or, for a deferred overflow, *deferred*, and
+   the ticket's `Done` is what the scheduler waits on.
+2. **Authorization is checked twice,** at adoption and before every run, so
+   revoking a grant stops the duty without a restart. A node role that cannot
+   be authorized fails closed and names the permissions it needs. A refused
+   run counts as a governor failure and as `Unauthorized`, and is not recorded
+   as done.
+3. **Exclusive node roles need a `Gate`** (adoption fails without one). A run
+   starts only if the gate says the node holds the node role; a node that
+   does not hold it records `NotHeld` and skips, which is not an error. The
+   run's context is cancelled when the gate reports the hold lost. The duties
+   must still be idempotent, as already decided.
+4. **A node that takes over an exclusive node role starts at its next
+   scheduled occurrence,** not at the moment it gains the lease. An event
+   raised on acquisition (`Emit`) would start it sooner; nothing raises it yet.
+5. **A duty that must survive pressure needs room in the queue.** Work held by
+   pressure waits in the node role's queue, so with a queue depth of zero it is
+   shed instead (start now or never). The membership node role wants that; one
+   that should wait does not.
+6. **`Status()`** merges, per node role, its effective limits and clamps, the
+   governor's counters and the scheduler's per-duty counters, for the Vitals
+   integration to report.
+
+**Built: `registrynoderole`,** the first real node roles, over the registry in
+Gatehouse-core:
+
+1. **Membership** (`archipelago.registry.membership`) registers the node's
+   Instance at setup, heartbeats on an interval with jitter, registers again if
+   the row is found missing (the registry's own contract: a new Instance, not a
+   retry of the old ID), and deregisters at close. Its budget is one run, no
+   queue and a short timeout; its priority is `important`; catch-up is skip and
+   overflow is drop, since a late heartbeat is useless and a burst of them is
+   worse.
+2. **`LeaseGate`** turns a registry lease into the `Gate`, with its own node
+   role (`archipelago.registry.lease.<group>.<name>`) that renews every third of
+   the TTL, tries immediately at adoption, and releases at close. It is
+   conservative: it believes it holds the lease only until a deadline computed
+   from its own clock *before* it asked, never later than the registry's, so if
+   renewals stop working it stops believing first. A renewal the registry
+   refuses (someone else holds it) ends the hold at once and closes the lost
+   channel. It is a liveness primitive and not a fencing token, as `13` says.
+
+**Tested** (`noderoles` with the real governor and scheduler on a manual
+clock; `registrynoderole` against real Postgres): duties run through the
+governor on schedule; a missing budget, unknown tier, failed authorization and
+failed setup each refuse the adoption and leave nothing behind; the node
+ceiling caps a tier and the adoption says so; drop and defer overflow; both
+authorization checks, including a grant revoked after adoption; the gate
+requirement, skipping while not held, and cancelling a run when the hold is
+lost; setup and teardown; a schedule override; start-event duties and a
+background node role held by pressure until it drops; membership registering,
+heartbeating, deregistering and re-registering a lost row; and two nodes
+sharing one lease, only the holder's exclusive duty running, and the other
+taking over after a release. Skipping the adoption check, the per-run check,
+the gate, the gate requirement, budget resolution, setup cleanup, the lost-row
+re-registration, the teardown deregistration, the gate's own deadline, the
+refused-renewal drop and the release drop each fail a test.
+
+**Not built:** the Gatehouse-core integration that supplies `Authorize` (the
+node principal's grants, recorded as `service_action` or `scheduled_task`
+authority per `09`); the Policy integration that resolves a domain's requested
+budget and schedule with `typedvalue` and `typeconstraints` and enforces a
+node role's declared floor; Vitals reporting of status and clamps; SDK
+`Config` carrying the shared governor and adopted node roles; node-local
+adoption config in TOML; the `vitals` retention-sweep node role; executor
+admission through the governor; and a shutdown event.
+
 ## Decisions so far
 
 1. **Node roles are non-unique by default**, and exclusive node roles are permitted
@@ -634,7 +719,7 @@ a `typeconstraints` bound applied there, not in the scheduler).
    testable against real Postgres); the `vitals` history retention sweep
    second; executor and director once the job system and Router exist.
    Build order: governor, scheduler, node role runner, then the registry
-   membership node role.
+   membership node role. *(The first four are built.)*
 8. **Catch-up record:** a small interface in `scheduler` (get and put the
    last run per node role and duty), in-memory by default so nodes with no
    storage get skip semantics; the durable implementation comes with the
