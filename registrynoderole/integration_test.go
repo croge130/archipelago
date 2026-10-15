@@ -109,21 +109,30 @@ func newNode(t *testing.T) *node {
 	return &node{gov: gov, clk: clk, rt: rt}
 }
 
+func (n *node) idle() bool {
+	if st := n.gov.Stats(); st.Running != 0 || st.Waiting != 0 {
+		return false
+	}
+	for _, r := range n.rt.Status() {
+		for _, d := range r.Duties {
+			if d.InFlight != 0 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 func (n *node) tick(t *testing.T, d time.Duration) {
 	t.Helper()
 	n.clk.Advance(d)
 	deadline := time.Now().Add(3 * time.Second)
-	for {
-		st := n.gov.Stats()
-		if st.Running == 0 && st.Waiting == 0 {
-			break
-		}
+	for !n.idle() {
 		if time.Now().After(deadline) {
 			t.Fatal("runs never finished")
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	time.Sleep(10 * time.Millisecond)
 }
 
 func useDefault() noderoles.Adoption {

@@ -17,6 +17,7 @@ use (
 	./mtls
 	./peerauth
 	./noderoles
+	./noderolesauth
 	./policy
 	./recurrence
 	./registry

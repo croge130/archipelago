@@ -17,6 +17,8 @@ import (
 	"github.com/croge130/archipelago/scheduler"
 )
 
+var errNoGrant = errors.New("no grant")
+
 var t0 = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 type env struct {
@@ -63,6 +65,19 @@ type counter struct{ n atomic.Int32 }
 
 func (c *counter) run(context.Context, scheduler.Fire) error { c.n.Add(1); return nil }
 
+// recv takes a value from ch or fails the test, so a duty that never runs is
+// a failure and not a hang.
+func recv[T any](t *testing.T, what string, ch <-chan T) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(3 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+		panic("unreachable")
+	}
+}
+
 func waitFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
@@ -78,12 +93,34 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 // the next minute does not overlap a run that completes asynchronously.
 func (e *env) tick(t *testing.T) {
 	t.Helper()
-	e.clk.Advance(time.Minute)
-	waitFor(t, "runs to finish", func() bool {
-		st := e.gov.Stats()
-		return st.Running == 0 && st.Waiting == 0
-	})
-	time.Sleep(5 * time.Millisecond) // the scheduler clears its own in-flight count on a goroutine
+	e.step(t, time.Minute)
+	waitFor(t, "runs to finish", func() bool { return e.idle() })
+}
+
+// step advances the clock once the previous run is entirely over, so the new
+// occurrence is never mistaken for an overlap with one that has finished but
+// not yet been noticed by the scheduler.
+func (e *env) step(t *testing.T, d time.Duration) {
+	t.Helper()
+	waitFor(t, "the previous run to be fully over", e.idle)
+	e.clk.Advance(d)
+}
+
+// idle is true when the governor has nothing running or waiting and the
+// scheduler has cleared every duty's in-flight count (it does so on its own
+// goroutine, after the run's Done).
+func (e *env) idle() bool {
+	if st := e.gov.Stats(); st.Running != 0 || st.Waiting != 0 {
+		return false
+	}
+	for _, r := range e.rt.Status() {
+		for _, d := range r.Duties {
+			if d.InFlight != 0 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 func def(key string, c *counter, schedule recurrence.Schedule) Definition {
@@ -135,7 +172,7 @@ func TestAdoptionMustStateABudgetAndAFailureTouchesNothingElse(t *testing.T) {
 		t.Errorf("re-adopting after a refused adoption: %v", err)
 	}
 	e.rt.Start()
-	e.clk.Advance(time.Minute)
+	e.step(t, time.Minute)
 	waitFor(t, "both roles to run", func() bool { return good.n.Load() == 1 && bad.n.Load() == 1 })
 }
 
@@ -179,7 +216,7 @@ func TestADutyThatMeetsAFullBudgetIsShedOrDeferredAsItDeclared(t *testing.T) {
 			}
 			e.rt.Start()
 			e.clk.Advance(time.Minute)
-			<-started
+			recv(t, "the first run to start", started)
 			e.clk.Advance(time.Minute) // second run due while the first holds the only slot
 			waitFor(t, "the second offer to be refused", func() bool {
 				ds := e.rt.Status()[0].Duties[0]
@@ -202,7 +239,7 @@ func TestAuthorizationIsCheckedAtAdoptionAndBeforeEveryRun(t *testing.T) {
 		if allowed.Load() {
 			return nil
 		}
-		return errors.New("no grant")
+		return errNoGrant
 	}
 	var c counter
 	d := def("myapp.audited", &c, every(t, time.Minute))
@@ -213,6 +250,9 @@ func TestAuthorizationIsCheckedAtAdoptionAndBeforeEveryRun(t *testing.T) {
 	_, err := e.rt.Adopt(context.Background(), d, a)
 	if !errors.Is(err, ErrNotAuthorized) || !strings.Contains(err.Error(), "myapp.audit.write") {
 		t.Fatalf("adopting without the permissions: %v (want it to fail closed and name what it needs)", err)
+	}
+	if !errors.Is(err, errNoGrant) {
+		t.Errorf("the underlying reason was flattened to text; a caller cannot recover it: %v", err)
 	}
 	allowed.Store(true)
 	if _, err := e.rt.Adopt(context.Background(), d, a); err != nil {
@@ -225,11 +265,11 @@ func TestAuthorizationIsCheckedAtAdoptionAndBeforeEveryRun(t *testing.T) {
 		t.Errorf("the check was given %s", got)
 	}
 	e.rt.Start()
-	e.clk.Advance(time.Minute)
+	e.step(t, time.Minute)
 	waitFor(t, "a run", func() bool { return c.n.Load() == 1 })
 
 	allowed.Store(false) // the grant is revoked after adoption
-	e.clk.Advance(time.Minute)
+	e.step(t, time.Minute)
 	waitFor(t, "the refused run to be counted", func() bool { return e.rt.Status()[0].Unauthorized == 1 })
 	if c.n.Load() != 1 {
 		t.Errorf("a duty ran after the node lost its authority (%d runs)", c.n.Load())
@@ -275,8 +315,9 @@ func TestAnExclusiveNodeRoleNeedsAGateRunsOnlyWhileHeldAndStopsWhenItIsLost(t *t
 		t.Fatal(err)
 	}
 	e.rt.Start()
-	e.clk.Advance(time.Minute) // not held: the duty must not run
+	e.step(t, time.Minute) // not held: the duty must not run
 	waitFor(t, "the not-held skip", func() bool { return e.rt.Status()[0].NotHeld == 1 })
+	waitFor(t, "the scheduler to see that run end", e.idle) // or the next slot would be skipped as an overlap
 	select {
 	case <-started:
 		t.Fatal("an exclusive duty ran on a node that does not hold it")
@@ -286,8 +327,8 @@ func TestAnExclusiveNodeRoleNeedsAGateRunsOnlyWhileHeldAndStopsWhenItIsLost(t *t
 	gate.mu.Lock()
 	gate.held = true
 	gate.mu.Unlock()
-	e.clk.Advance(time.Minute)
-	<-started
+	e.step(t, time.Minute)
+	recv(t, "the exclusive duty to start once the gate is held", started)
 	gate.lose() // the lease is lost mid-run
 	select {
 	case err := <-ctxEnded:
@@ -395,7 +436,7 @@ func TestEventDutiesAndPressureWorkThroughTheRuntime(t *testing.T) {
 	waitFor(t, "the start event duty", func() bool { return onStart.n.Load() == 1 })
 
 	e.gov.SetPressure(governor.PressureElevated) // the application is strained
-	e.clk.Advance(time.Minute)
+	e.step(t, time.Minute)
 	waitFor(t, "the important duty", func() bool { return imp.n.Load() == 1 })
 	time.Sleep(60 * time.Millisecond)
 	if bg.n.Load() != 0 {
@@ -448,8 +489,40 @@ func TestAPanickingDutyIsAFailureAndTheScheduleCarriesOn(t *testing.T) {
 		}}}}
 	e.rt.Adopt(context.Background(), d, tierLow())
 	e.rt.Start()
-	e.clk.Advance(time.Minute)
+	e.step(t, time.Minute)
 	waitFor(t, "the first run to fail", func() bool { return e.rt.Status()[0].Governor.Failed == 1 })
-	e.clk.Advance(time.Minute)
+	waitFor(t, "the scheduler to see it end", e.idle)
+	e.step(t, time.Minute)
 	waitFor(t, "the next run", func() bool { return e.rt.Status()[0].Governor.Completed == 1 })
+}
+
+func TestAnnotateShapesTheContextEachRunReceives(t *testing.T) {
+	e := setup(t, governor.Ceiling{Concurrency: 4})
+	type key struct{}
+	seen := make(chan string, 4)
+	d := Definition{Key: "myapp.annotated", Tiers: tiers, Duties: []Duty{{
+		Name: "w", Schedule: every(t, time.Minute), Events: []string{"poke"},
+		Run: func(ctx context.Context, f scheduler.Fire) error {
+			v, _ := ctx.Value(key{}).(string)
+			seen <- v
+			return nil
+		}}}}
+	a := tierLow()
+	a.Annotate = func(ctx context.Context, role, duty string, f scheduler.Fire) context.Context {
+		kind := "scheduled"
+		if f.Event != "" {
+			kind = "event:" + f.Event
+		}
+		return context.WithValue(ctx, key{}, role+"/"+duty+" "+kind)
+	}
+	if _, err := e.rt.Adopt(context.Background(), d, a); err != nil {
+		t.Fatal(err)
+	}
+	e.rt.Start()
+	e.tick(t)
+	e.rt.Emit("poke")
+	got := []string{recv(t, "the scheduled run", seen), recv(t, "the event run", seen)}
+	if got[0] != "myapp.annotated/w scheduled" || got[1] != "myapp.annotated/w event:poke" {
+		t.Errorf("contexts %v", got)
+	}
 }

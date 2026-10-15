@@ -115,6 +115,7 @@ archipelago/
   router/                     # transit + wire + logging; the dispatch layer (21)
   routerauth/                 # router + peerauth + gatehouse-core: route, permission and endpoint in one call
   noderoles/                  # governor + scheduler + recurrence; adopt a node role, run its duties inside a budget (19)
+  noderolesauth/              # noderoles + gatehouse-core: authorize against the node principal's grants, record the three identities (09, 19)
   registrynoderole/           # noderoles + gatehouse-core: registry membership and lease gate node roles (13, 19)
   scheduler/                  # recurrence; when a duty is due: overlap, catch-up, jitter, events; offers runs to a Dispatcher (19)
   recurrence/                 # none of ours (cron parser only); next-occurrence math shared by scheduler and recurring jobs (19, 20)

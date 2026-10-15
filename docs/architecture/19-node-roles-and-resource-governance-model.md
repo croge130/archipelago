@@ -1,9 +1,9 @@
 # Adopting node roles, and bounding what they cost
 
 **Status: design draft; the resource governor, `recurrence`, the scheduler,
-the node role runtime and the registry membership node role are built** (see
-the "Status of..." sections near the end). The Policy, Gatehouse-core and
-Vitals integrations and the SDK wiring are still design. Like
+the node role runtime, the registry membership node role and the Gatehouse-core
+integration are built** (see the "Status of..." sections near the end). The
+Policy and Vitals integrations and the SDK wiring are still design. Like
 [`18-peer-discovery-and-capabilities-model.md`](18-peer-discovery-and-capabilities-model.md),
 which this builds on, it pins vocabulary and boundaries first.
 
@@ -682,9 +682,48 @@ the gate, the gate requirement, budget resolution, setup cleanup, the lost-row
 re-registration, the teardown deregistration, the gate's own deadline, the
 refused-renewal drop and the release drop each fail a test.
 
-**Not built:** the Gatehouse-core integration that supplies `Authorize` (the
-node principal's grants, recorded as `service_action` or `scheduled_task`
-authority per `09`); the Policy integration that resolves a domain's requested
+**Built: `noderolesauth`,** the Gatehouse-core integration:
+
+1. **`Authorizer`** checks that the node's principal holds every permission a
+   node role needs, globally and at standard authority, and reports **all**
+   that it lacks in a `MissingPermissionsError` (which matches
+   `evaluation.ErrDenied`). A permission nobody registered counts as lacking,
+   since the evaluator denies an unknown key. A store failure is returned as
+   itself and not as a denial, so a log can tell an outage from a refusal; the
+   runtime fails closed on both.
+2. **`Annotator`** puts an `Authority` in each run's context, read back with
+   `AuthorityFrom`: the actor and the requester (the node itself, for a node
+   acting under its own standing authority), the source (`scheduled_task` for a
+   run a scheduler triggered, `service_action` for one an event triggered), and
+   the reference `<node role>/<duty>`. This is `09`'s three-identity shape. The
+   duty passes it on to whatever it writes. There is no Go type for the source
+   vocabulary yet, so the names are the doc's strings.
+3. **`Bind`** sets both on an adoption and leaves the rest alone;
+   **`RegisterPermissions`** registers every permission a set of definitions
+   names, idempotently, with the reserved-namespace guard applying unless a core
+   node role sets the override.
+4. **`recovery_elevation` is unreachable:** every check is at standard
+   authority and nothing here can ask for more.
+5. **A finding that fixed `noderoles`:** the runtime had flattened the
+   underlying authorization error to text (`%v`), so a caller could not
+   recover which permissions were missing. It now wraps both the sentinel and
+   the cause, and a test pins it. `noderoles` also gained an `Annotate` hook
+   and an outcome log line per run (failures at warn, successes at debug).
+6. **Tested** against real Postgres: all-missing reporting including an
+   unregistered key; an outage not mistaken for a refusal; adoption refused
+   without grants, working with them, stopping when one is revoked and
+   resuming when it returns, with no restart; both authority sources; the
+   registration guard. Reporting only the first missing permission, treating a
+   store failure as success, mislabelling the source, dropping the requester,
+   bypassing the namespace guard and flattening the error type each fail a test.
+
+**Test-suite note:** the scheduler clears a run's in-flight count on its own
+goroutine after the run ends, so tests that advance a manual clock must wait for
+the scheduler (not just the governor) to be idle first, or the next occurrence
+is skipped as an overlap. Three flaky tests of this kind were found by
+repeating the suite under the race detector and fixed with a shared idle check.
+
+**Not built:** the Policy integration that resolves a domain's requested
 budget and schedule with `typedvalue` and `typeconstraints` and enforces a
 node role's declared floor; Vitals reporting of status and clamps; SDK
 `Config` carrying the shared governor and adopted node roles; node-local

@@ -94,6 +94,11 @@ type Adoption struct {
 	// Authorize checks the node's principal holds the permissions, and is
 	// called at adoption and before each run. Nil means no check.
 	Authorize func(ctx context.Context, permissions []string) error
+	// Annotate returns the context a duty's run receives, so an integration
+	// can attach who the work runs as and why (the three identities of 09).
+	// It is given the node role, the duty and the occurrence. Nil means the
+	// context is passed through.
+	Annotate func(ctx context.Context, role, duty string, f scheduler.Fire) context.Context
 }
 
 var (
@@ -216,7 +221,7 @@ func (rt *Runtime) Adopt(ctx context.Context, def Definition, a Adoption) (*Adop
 	}
 	if a.Authorize != nil {
 		if err := a.Authorize(ctx, def.Permissions); err != nil {
-			return nil, fmt.Errorf("%w: %s needs %s: %v", ErrNotAuthorized, def.Key, strings.Join(def.Permissions, ", "), err)
+			return nil, fmt.Errorf("%w: %s needs %s: %w", ErrNotAuthorized, def.Key, strings.Join(def.Permissions, ", "), err)
 		}
 	}
 	prio := a.Priority
@@ -260,7 +265,7 @@ func (rt *Runtime) Adopt(ctx context.Context, def Definition, a Adoption) (*Adop
 		}
 		if err := rt.sched.Add(scheduler.Duty{
 			Role: def.Key, Name: d.Name, Schedule: sched, Events: d.Events, Jitter: d.Jitter,
-			Overlap: d.Overlap, CatchUp: d.CatchUp, MaxCatchUp: d.MaxCatchUp, DeferRetry: d.DeferRetry, Run: d.Run,
+			Overlap: d.Overlap, CatchUp: d.CatchUp, MaxCatchUp: d.MaxCatchUp, DeferRetry: d.DeferRetry, Run: ad.runner(d),
 		}); err != nil {
 			for _, n := range added {
 				rt.sched.Remove(def.Key, n)
@@ -332,6 +337,24 @@ func (a *Adopted) Close(ctx context.Context) error {
 	return err
 }
 
+// runner wraps a duty's Run with the context annotation and an outcome log.
+func (a *Adopted) runner(d Duty) func(context.Context, scheduler.Fire) error {
+	return func(ctx context.Context, f scheduler.Fire) error {
+		if a.adpt.Annotate != nil {
+			ctx = a.adpt.Annotate(ctx, a.def.Key, d.Name, f)
+		}
+		started := time.Now()
+		err := d.Run(ctx, f)
+		attrs := []any{"node_role", a.def.Key, "duty", d.Name, "slot", f.Slot, "event", f.Event, "attempt", f.Attempt, "catch_up", f.CatchUp, "duration", time.Since(started)}
+		if err != nil {
+			a.rt.log.Warn("duty run failed", append(attrs, "error", err.Error())...)
+		} else {
+			a.rt.log.Debug("duty run finished", attrs...)
+		}
+		return err
+	}
+}
+
 // dispatch is the scheduler's Dispatcher: it turns "this duty is due" into a
 // piece of governed work.
 func (rt *Runtime) dispatch(roleKey, duty string, run func(ctx context.Context) error) scheduler.Handle {
@@ -389,7 +412,7 @@ func (a *Adopted) guarded(ctx context.Context, run func(context.Context) error) 
 		if err := a.adpt.Authorize(ctx, a.def.Permissions); err != nil {
 			a.unauthorized.Add(1)
 			a.rt.log.Warn("a duty did not run: the node is no longer authorized", "node_role", a.def.Key, "error", err.Error())
-			return fmt.Errorf("%w: %v", ErrNotAuthorized, err)
+			return fmt.Errorf("%w: %w", ErrNotAuthorized, err)
 		}
 	}
 	return run(ctx)
