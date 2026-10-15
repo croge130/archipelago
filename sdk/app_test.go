@@ -5,11 +5,16 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/croge130/archipelago/gatehouse-core/evaluation"
 	gatehouseFacade "github.com/croge130/archipelago/gatehouse-core/facade"
 	gatehouseStructure "github.com/croge130/archipelago/gatehouse-core/structure"
+	"github.com/croge130/archipelago/governor"
 	jobsFacade "github.com/croge130/archipelago/jobs/facade"
+	"github.com/croge130/archipelago/noderoles"
+	"github.com/croge130/archipelago/recurrence"
+	"github.com/croge130/archipelago/scheduler"
 	"github.com/google/uuid"
 )
 
@@ -196,5 +201,163 @@ func TestSeedAddsTheJobsStepOnlyWhenBothModesAreOn(t *testing.T) {
 	}
 	if len(report) != 2 || names[1] != "jobsauth.RegisterPermissions" || report[1].Status != SeedSkipped {
 		t.Fatalf("want the gatehouse step then the jobsauth step, both skipped (no Writer): %v %+v", names, report)
+	}
+}
+
+// ---- node roles ----------------------------------------------------------
+
+// denyingReader answers the one lookup an authorization starts with: the
+// permission is not registered, so every check is a denial. Anything else
+// panics, which proves nothing else is consulted.
+type denyingReader struct{ gatehouseFacade.Reader }
+
+func (denyingReader) GetPermissionDefinition(context.Context, string) (gatehouseStructure.PermissionDefinition, bool, error) {
+	return gatehouseStructure.PermissionDefinition{}, false, nil
+}
+
+func nodeRoleConfig(t *testing.T) *NodeRoleConfig {
+	t.Helper()
+	gov, err := governor.New(governor.Config{Node: governor.Ceiling{Concurrency: 2}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(gov.Close)
+	return &NodeRoleConfig{Governor: gov, Domain: "d", PrincipalID: uuid.New()}
+}
+
+func sweeper(perms ...string) noderoles.Definition {
+	every, _ := recurrence.Every(time.Hour, time.Time{})
+	return noderoles.Definition{
+		Key: "myapp.sweeper", Permissions: perms, Default: &governor.Limits{Concurrency: 1},
+		Duties: []noderoles.Duty{{Name: "sweep", Schedule: every, Run: func(context.Context, scheduler.Fire) error { return nil }}},
+	}
+}
+
+func useDefault() noderoles.Adoption {
+	return noderoles.Adoption{Budget: governor.Adoption{UseDefault: true}}
+}
+
+func TestNodeRolesModeNamesEverythingItNeeds(t *testing.T) {
+	_, err := New(Stores{}, Modes{NodeRoles: true}, Config{})
+	if !errors.Is(err, ErrMissingStore) || !strings.Contains(err.Error(), "Config.NodeRoles") {
+		t.Fatalf("no config: %v", err)
+	}
+	_, err = New(gatehouseOnly(), Modes{Gatehouse: true, NodeRoles: true}, Config{NodeRoles: &NodeRoleConfig{}})
+	if !errors.Is(err, ErrMissingStore) {
+		t.Fatalf("empty config: %v", err)
+	}
+	for _, want := range []string{"Governor", "Domain", "PrincipalID"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not name %s", err, want)
+		}
+	}
+	// Without Gatehouse there is no authority to check, so no principal is needed.
+	cfg := nodeRoleConfig(t)
+	cfg.PrincipalID = uuid.Nil
+	if _, err := New(Stores{}, Modes{NodeRoles: true}, Config{NodeRoles: cfg}); err != nil {
+		t.Errorf("a scoped node with node roles but no Gatehouse: %v", err)
+	}
+	// And New touched no store: the fake would have panicked.
+	if _, err := New(gatehouseOnly(), Modes{Gatehouse: true, NodeRoles: true}, Config{NodeRoles: nodeRoleConfig(t)}); err != nil {
+		t.Errorf("New: %v", err)
+	}
+}
+
+func TestTheRuntimeIsCreatedOnceAndOnlyWhenTheModeIsOn(t *testing.T) {
+	off, _ := New(Stores{}, Modes{}, Config{})
+	if _, err := off.NodeRoles(); !errors.Is(err, ErrNodeRolesDisabled) {
+		t.Errorf("mode off: %v", err)
+	}
+	if _, err := off.AdoptNodeRole(context.Background(), sweeper(), useDefault()); !errors.Is(err, ErrNodeRolesDisabled) {
+		t.Errorf("AdoptNodeRole with the mode off: %v", err)
+	}
+	app, err := New(Stores{}, Modes{NodeRoles: true}, Config{NodeRoles: nodeRoleConfig(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err1 := app.NodeRoles()
+	b, err2 := app.NodeRoles()
+	if err1 != nil || err2 != nil || a != b {
+		t.Errorf("two calls gave different runtimes or an error: %p %p %v %v", a, b, err1, err2)
+	}
+	t.Cleanup(func() { a.Stop(context.Background()) })
+}
+
+func TestWithoutGatehouseARoleNeedingPermissionsIsRefusedNotRunUnchecked(t *testing.T) {
+	app, err := New(Stores{}, Modes{NodeRoles: true}, Config{NodeRoles: nodeRoleConfig(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, _ := app.NodeRoles()
+	t.Cleanup(func() { rt.Stop(context.Background()) })
+	if _, err := app.AdoptNodeRole(context.Background(), sweeper("myapp.sweep"), useDefault()); !errors.Is(err, ErrCannotAuthorize) {
+		t.Fatalf("a node role needing permissions: %v", err)
+	}
+	if _, err := app.AdoptNodeRole(context.Background(), sweeper(), useDefault()); err != nil {
+		t.Errorf("a node role needing none: %v", err)
+	}
+}
+
+func TestAdoptionAlwaysBindsTheNodesAuthorityAndCannotBeAdoptedAround(t *testing.T) {
+	stores := Stores{Gatehouse: GatehouseStores{Reader: denyingReader{}}}
+	app, err := New(stores, Modes{Gatehouse: true, NodeRoles: true}, Config{NodeRoles: nodeRoleConfig(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, _ := app.NodeRoles()
+	t.Cleanup(func() { rt.Stop(context.Background()) })
+
+	// The caller supplies an Authorize that says yes to everything. The App's
+	// own authority check replaces it, and the node principal holds nothing.
+	lax := useDefault()
+	lax.Authorize = func(context.Context, []string) error { return nil }
+	if _, err := app.AdoptNodeRole(context.Background(), sweeper("myapp.sweep"), lax); !errors.Is(err, noderoles.ErrNotAuthorized) {
+		t.Fatalf("a caller-supplied Authorize got a node role adopted: %v", err)
+	}
+	// A node role needing nothing is unaffected.
+	if _, err := app.AdoptNodeRole(context.Background(), sweeper(), useDefault()); err != nil {
+		t.Errorf("a node role needing no permissions: %v", err)
+	}
+}
+
+func TestSeedRegistersNodeRolePermissionsOnlyWithGatehouseAndANodeRolesMode(t *testing.T) {
+	cfg := nodeRoleConfig(t)
+	cfg.Definitions = []noderoles.Definition{sweeper("myapp.sweep")}
+
+	app, _ := New(gatehouseOnly(), Modes{Gatehouse: true, NodeRoles: true}, Config{NodeRoles: cfg})
+	report, err := app.Seed(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, s := range report {
+		if s.Name == "noderolesauth.RegisterPermissions" {
+			found = true
+			if s.Status != SeedSkipped {
+				t.Errorf("without a Writer the step should be skipped: %+v", s)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("the step is missing: %+v", report)
+	}
+
+	noGate, _ := New(Stores{}, Modes{NodeRoles: true}, Config{NodeRoles: cfg})
+	report, _ = noGate.Seed(context.Background())
+	for _, s := range report {
+		if strings.HasPrefix(s.Name, "noderolesauth") {
+			t.Errorf("a step for a mode that is not on: %+v", s)
+		}
+	}
+}
+
+func TestMembershipNeedsItsModesAndAWriter(t *testing.T) {
+	app, _ := New(gatehouseOnly(), Modes{Gatehouse: true, NodeRoles: true}, Config{NodeRoles: nodeRoleConfig(t)})
+	if _, err := app.Membership("workers", nil, 0); err == nil || !strings.Contains(err.Error(), "Writer") {
+		t.Errorf("a read-only node: %v", err)
+	}
+	none, _ := New(Stores{}, Modes{}, Config{})
+	if _, err := none.Membership("workers", nil, 0); err == nil {
+		t.Error("Membership worked with the modes off")
 	}
 }

@@ -29,7 +29,8 @@ Postgres-backed, so that wiring looks like:
 4. On every startup, run the idempotent seeding steps:
    `gatehouse/facade.RegisterAssumePermissions`,
    `aliasauth.RegisterPermissions`, `vitalsauth.RegisterPermissions`,
-   `jobsauth.RegisterPermissions`, `vitals/facade.SeedBuiltinDefinitions`,
+   `jobsauth.RegisterPermissions`, `noderolesauth.RegisterPermissions`,
+   `vitals/facade.SeedBuiltinDefinitions`,
    `vitalsdefaults.EnsurePolicyDefinition`.
 
 Steps 1 and 2 are *the DB-backed way of obtaining stores*, not something
@@ -200,10 +201,38 @@ enables just `Vitals` and gets the narrower set of seeding steps.
 | `Vitals` | `Stores.Vitals.Reader` | `SeedBuiltinDefinitions`; with `Gatehouse`: `vitalsauth.RegisterPermissions`; with `Policy`: `vitalsdefaults.EnsurePolicyDefinition` |
 | `Jobs` | `Stores.Jobs.Reader` | with `Gatehouse`: `jobsauth.RegisterPermissions`. Also enables `App.JobsAuth()`, which assembles `jobsauth.Deps` from the App's own stores (it needs both modes; a node holding only the jobs base uses its facade directly) |
 | `Certs` | `Stores.Certs.Reader` | — |
+| `NodeRoles` | `Config.NodeRoles`: the node-wide `Governor`, a `Domain`, and (with `Gatehouse`) the node's `PrincipalID`. No store of its own | with `Gatehouse`: `noderolesauth.RegisterPermissions` for `Config.NodeRoles.Definitions`. Also enables `App.NodeRoles()` (the domain's runtime, built once, nothing started), `App.AdoptNodeRole` and, with `Gatehouse` and a writer, `App.Membership` (see below) |
 | `SSOProvider` | the `Gatehouse` and `Certs` modes, plus `Config.SSOSigner` — the SDK never generates or stores this key itself, matching `12-sso-tickets-model.md`'s "never the mTLS key" rule | — |
 
 Only the **Reader** is required by `New`; a Writer is only needed by the
 `Seed` steps that write, and their absence is a skip, not an error.
+
+### Node roles
+
+The `NodeRoles` mode ([`19`](19-node-roles-and-resource-governance-model.md))
+follows the same rules as the others: `New` performs no I/O, and `Seed` is the
+only writer.
+
+1. **The governor is the node's, not the App's.** The process creates one
+   `governor.Governor` and passes it in `Config.NodeRoles` to the App of every
+   domain on the node, so the node's ceiling binds them together. The process
+   owns and closes it; an App never does. `Domain` names this App's share of it.
+2. **`App.AdoptNodeRole` always binds the node's authority.** With `Gatehouse`
+   on, the adoption is authorized against `Config.NodeRoles.PrincipalID`'s
+   grants, now and before every run, and each run records who it ran as
+   (`noderolesauth`). A caller cannot adopt around it: an `Authorize` or
+   `Annotate` it supplied is replaced. Without `Gatehouse` a node role that
+   needs permissions is refused (`ErrCannotAuthorize`), because they cannot be
+   checked; one that needs none is adopted.
+3. **`App.Membership`** builds the registry membership node role over the App's
+   own Gatehouse stores and the node's principal, the way `App.JobsAuth()`
+   assembles `jobsauth.Deps`. It needs a Gatehouse writer, since it registers
+   and heartbeats an Instance. Adopt what it returns with `AdoptNodeRole`.
+4. **`Seed` registers the permissions** of `Config.NodeRoles.Definitions`
+   (with `AllowReservedNamespace` for core node roles), so adoption has them
+   to find.
+5. **Nothing is started by the SDK.** `App.NodeRoles()` returns the runtime
+   and the caller starts and stops it when the node is ready.
 
 ## Status
 
@@ -218,6 +247,18 @@ becoming a denial. `sdkdb`'s tests run against real Postgres: a full app
 seeded twice in a row with one real cross-module flow
 (`EnsurePrincipal` → grant → `vitalsauth.WriteReading`), a read-only app
 over data a writer node seeded, and a scoped Vitals-only app.
+
+**Built since: the `NodeRoles` mode** (above). `sdk`'s tests cover its
+validation (every missing piece named together), the single runtime, the
+refusal of permission-needing node roles without `Gatehouse`, that an
+`Authorize` the caller supplies cannot replace the node's own, and the Seed
+step's presence and skip. `sdkdb`'s test runs a node through nothing but the
+SDK against real Postgres: Seed registers the permission, adoption fails
+closed without the grant and works with it, membership registers the node in
+the registry and heartbeats, a revoked grant stops the duty with no restart,
+and stopping deregisters. Removing the authority binding, the
+permission refusal, the runtime caching or the governor requirement each
+fails a test.
 
 **A correction to the intent above, found while building:** the goal was
 that `sdk` never depend on `db` or pgx. The first half holds —

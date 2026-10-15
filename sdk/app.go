@@ -4,8 +4,11 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	certstoreEvaluation "github.com/croge130/archipelago/certstore/evaluation"
+	"github.com/croge130/archipelago/noderoles"
+	"github.com/google/uuid"
 )
 
 // ErrMissingStore is wrapped by every error New returns for a mode whose
@@ -23,6 +26,10 @@ type Config struct {
 	// SDK never generates or stores this key itself — 12-sso-tickets-
 	// model.md requires it be distinct from any mTLS key.
 	SSOSigner certstoreEvaluation.Signer
+
+	// NodeRoles configures node role adoption; required by the NodeRoles
+	// mode, ignored otherwise.
+	NodeRoles *NodeRoleConfig
 }
 
 // App is a validated set of stores plus the modes they were validated
@@ -32,6 +39,10 @@ type App struct {
 	Stores
 	Modes  Modes
 	Config Config
+
+	nodeRolesOnce sync.Once
+	nodeRoles     *noderoles.Runtime
+	nodeRolesErr  error
 }
 
 // New validates stores against modes and returns an App. It performs no
@@ -64,6 +75,17 @@ func New(stores Stores, modes Modes, cfg Config) (*App, error) {
 	}
 	if modes.Certs {
 		need(stores.Certs.Reader != nil, "Certs", "Stores.Certs.Reader")
+	}
+	if modes.NodeRoles {
+		nr := cfg.NodeRoles
+		need(nr != nil, "NodeRoles", "Config.NodeRoles")
+		if nr != nil {
+			need(nr.Governor != nil, "NodeRoles", "Config.NodeRoles.Governor (one per node, shared by every App)")
+			need(nr.Domain != "", "NodeRoles", "Config.NodeRoles.Domain")
+			if modes.Gatehouse {
+				need(nr.PrincipalID != uuid.Nil, "NodeRoles", "Config.NodeRoles.PrincipalID (with Gatehouse on, the node's authority is checked)")
+			}
+		}
 	}
 	if modes.SSOProvider {
 		need(modes.Gatehouse, "SSOProvider", "the Gatehouse mode")

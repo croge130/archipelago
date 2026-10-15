@@ -8,6 +8,7 @@ import (
 	"github.com/croge130/archipelago/aliasauth"
 	gatehouseFacade "github.com/croge130/archipelago/gatehouse-core/facade"
 	"github.com/croge130/archipelago/jobsauth"
+	"github.com/croge130/archipelago/noderolesauth"
 	vitalsFacade "github.com/croge130/archipelago/vitals/facade"
 	"github.com/croge130/archipelago/vitalsauth"
 	"github.com/croge130/archipelago/vitalsdefaults"
@@ -91,6 +92,13 @@ func (a *App) Seed(ctx context.Context) (SeedReport, error) {
 	if a.Modes.Jobs && a.Modes.Gatehouse {
 		run("jobsauth.RegisterPermissions", gatehouseWritable, "no Gatehouse Writer", func() error {
 			return jobsauth.RegisterPermissions(ctx, a.Gatehouse.Reader, a.Gatehouse.Writer)
+		})
+	}
+	if a.Modes.NodeRoles && a.Modes.Gatehouse {
+		run("noderolesauth.RegisterPermissions", gatehouseWritable, "no Gatehouse Writer", func() error {
+			nr := a.Config.NodeRoles
+			return noderolesauth.RegisterPermissions(ctx, a.Gatehouse.Reader, a.Gatehouse.Writer,
+				gatehouseFacade.RegisterPermissionOptions{AllowReservedNamespace: nr.AllowReservedNamespace}, nr.Definitions...)
 		})
 	}
 	if a.Modes.Vitals {

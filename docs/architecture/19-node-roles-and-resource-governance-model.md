@@ -1,9 +1,9 @@
 # Adopting node roles, and bounding what they cost
 
 **Status: design draft; the resource governor, `recurrence`, the scheduler,
-the node role runtime, the registry membership node role and the Gatehouse-core
-integration are built** (see the "Status of..." sections near the end). The
-Policy and Vitals integrations and the SDK wiring are still design. Like
+the node role runtime, the registry membership node role, the Gatehouse-core
+integration and the SDK wiring are built** (see the "Status of..." sections
+near the end). The Policy and Vitals integrations are still design. Like
 [`18-peer-discovery-and-capabilities-model.md`](18-peer-discovery-and-capabilities-model.md),
 which this builds on, it pins vocabulary and boundaries first.
 
@@ -723,10 +723,16 @@ the scheduler (not just the governor) to be idle first, or the next occurrence
 is skipped as an overlap. Three flaky tests of this kind were found by
 repeating the suite under the race detector and fixed with a shared idle check.
 
+**Built: the SDK wiring** (`17`, "Node roles"): a `NodeRoles` mode, a
+`Config.NodeRoles` carrying the node-wide governor, the domain name and the
+node's principal, `App.NodeRoles()`, `App.AdoptNodeRole` (which always binds
+the node's authority) and `App.Membership`, with a Seed step for the
+permissions of the node roles a node expects to adopt. A node adopts and runs
+node roles through nothing but the SDK, tested against real Postgres.
+
 **Not built:** the Policy integration that resolves a domain's requested
 budget and schedule with `typedvalue` and `typeconstraints` and enforces a
-node role's declared floor; Vitals reporting of status and clamps; SDK
-`Config` carrying the shared governor and adopted node roles; node-local
+node role's declared floor; Vitals reporting of status and clamps; node-local
 adoption config in TOML; the `vitals` retention-sweep node role; executor
 admission through the governor; and a shutdown event.
 
