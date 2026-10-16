@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +36,13 @@ type Duty struct {
 	Overflow governor.Overflow
 	// Priority overrides the node role's for this duty.
 	Priority governor.Priority
+
+	// MinInterval is the shortest time between occurrences this duty was
+	// designed to withstand: a floor on any schedule a domain's policy asks
+	// for. The runtime does not enforce it (a schedule given at adoption is the
+	// node's own decision); the Policy integration applies it to what policy
+	// requests, and reports when it does. Zero means no floor.
+	MinInterval time.Duration
 
 	Run func(ctx context.Context, f scheduler.Fire) error
 }
@@ -163,10 +171,14 @@ type Adopted struct {
 	def  Definition
 	adpt Adoption
 	role *governor.Role
-	// Limits are what the node role really runs under, after the node's
-	// ceilings; Clamps lists every dimension a ceiling reduced.
-	Limits governor.Limits
-	Clamps []governor.Clamp
+	// base is the budget the adoption stated: the most the node agreed to for
+	// this node role. A domain's policy may ask for less; it can never be given
+	// more than this (the node is the narrowest scope, and it caps the wider).
+	base governor.Limits
+	// defaults are the schedules the duties were adopted with: the duty's own,
+	// or the adoption's override. Policy changes them; removing the policy
+	// value restores these.
+	defaults map[string]recurrence.Schedule
 
 	duties map[string]Duty
 
@@ -232,7 +244,7 @@ func (rt *Runtime) Adopt(ctx context.Context, def Definition, a Adoption) (*Adop
 	if err != nil {
 		return nil, fmt.Errorf("noderoles: adopting %q: %w", def.Key, err)
 	}
-	ad := &Adopted{rt: rt, def: def, adpt: a, role: role, Limits: role.Limits(), Clamps: role.Clamps(), duties: map[string]Duty{}}
+	ad := &Adopted{rt: rt, def: def, adpt: a, role: role, base: requested, duties: map[string]Duty{}, defaults: map[string]recurrence.Schedule{}}
 	// Complete before anything can look it up: a started runtime may fire the
 	// first duty while the later ones are still being scheduled.
 	for _, d := range def.Duties {
@@ -263,6 +275,7 @@ func (rt *Runtime) Adopt(ctx context.Context, def Definition, a Adoption) (*Adop
 		if o, ok := a.Schedules[d.Name]; ok {
 			sched = o
 		}
+		ad.defaults[d.Name] = sched
 		if err := rt.sched.Add(scheduler.Duty{
 			Role: def.Key, Name: d.Name, Schedule: sched, Events: d.Events, Jitter: d.Jitter,
 			Overlap: d.Overlap, CatchUp: d.CatchUp, MaxCatchUp: d.MaxCatchUp, DeferRetry: d.DeferRetry, Run: ad.runner(d),
@@ -278,7 +291,7 @@ func (rt *Runtime) Adopt(ctx context.Context, def Definition, a Adoption) (*Adop
 		}
 		added = append(added, d.Name)
 	}
-	rt.log.Info("node role adopted", "node_role", def.Key, "domain", rt.cfg.Domain, "limits", fmt.Sprintf("%+v", ad.Limits), "clamps", len(ad.Clamps))
+	rt.log.Info("node role adopted", "node_role", def.Key, "domain", rt.cfg.Domain, "limits", fmt.Sprintf("%+v", ad.Limits()), "clamps", len(ad.Clamps()))
 	return ad, nil
 }
 
@@ -315,8 +328,90 @@ func (rt *Runtime) Stop(ctx context.Context) {
 	}
 }
 
+// Adopted lists the node roles this runtime currently runs, in key order.
+func (rt *Runtime) Adopted() []*Adopted {
+	rt.mu.Lock()
+	defer rt.mu.Unlock()
+	out := make([]*Adopted, 0, len(rt.roles))
+	for _, a := range rt.roles {
+		out = append(out, a)
+	}
+	slices.SortFunc(out, func(x, y *Adopted) int { return strings.Compare(x.def.Key, y.def.Key) })
+	return out
+}
+
 // Emit raises an event for duties subscribed to it.
 func (rt *Runtime) Emit(event string) { rt.sched.Emit(event) }
+
+// Key is the node role's key.
+func (a *Adopted) Key() string { return a.def.Key }
+
+// Definition is the node role as it was adopted.
+func (a *Adopted) Definition() Definition { return a.def }
+
+// Base is the budget the adoption stated, before any ceiling or policy: what
+// the node consented to give this node role at most.
+func (a *Adopted) Base() governor.Limits { return a.base }
+
+// DefaultSchedule is the schedule a duty was adopted with (nil for a duty
+// driven only by events), which is what it returns to when a policy value
+// that changed it is removed.
+func (a *Adopted) DefaultSchedule(duty string) recurrence.Schedule { return a.defaults[duty] }
+
+// Limits are what the node role really runs under now, after the node's
+// ceilings.
+func (a *Adopted) Limits() governor.Limits { return a.role.Limits() }
+
+// Clamps lists every dimension a ceiling reduced, empty if none.
+func (a *Adopted) Clamps() []governor.Clamp { return a.role.Clamps() }
+
+// Update is a change to a running node role. A zero field changes nothing.
+type Update struct {
+	// Budget replaces what the node role asks for; the domain share and node
+	// ceiling apply to it as at adoption. It is not checked against Base: that
+	// is the caller's rule (the Policy integration caps a request at Base).
+	Budget *governor.Limits
+	// Schedules replaces duties' schedules by duty name; the new schedule
+	// applies from now.
+	Schedules map[string]recurrence.Schedule
+	// Enabled turns duties on or off by duty name.
+	Enabled map[string]bool
+}
+
+// Reconfigure applies an Update to a running node role: a changed budget
+// without disturbing work in flight, a changed schedule from now, a duty
+// switched off or on. Nothing is applied unless every duty named exists. It
+// returns what the ceilings capped in a new budget.
+func (a *Adopted) Reconfigure(u Update) ([]governor.Clamp, error) {
+	for name := range u.Schedules {
+		if _, ok := a.duties[name]; !ok {
+			return nil, fmt.Errorf("noderoles: node role %q has no duty %q to reschedule", a.def.Key, name)
+		}
+	}
+	for name := range u.Enabled {
+		if _, ok := a.duties[name]; !ok {
+			return nil, fmt.Errorf("noderoles: node role %q has no duty %q to enable or disable", a.def.Key, name)
+		}
+	}
+	var clamps []governor.Clamp
+	if u.Budget != nil {
+		var err error
+		if clamps, err = a.role.Reconfigure(*u.Budget); err != nil {
+			return nil, fmt.Errorf("noderoles: reconfiguring %q: %w", a.def.Key, err)
+		}
+	}
+	for name, sched := range u.Schedules {
+		if err := a.rt.sched.Reschedule(a.def.Key, name, sched); err != nil {
+			return clamps, fmt.Errorf("noderoles: rescheduling %q/%s: %w", a.def.Key, name, err)
+		}
+	}
+	for name, on := range u.Enabled {
+		if err := a.rt.sched.SetEnabled(a.def.Key, name, on); err != nil {
+			return clamps, fmt.Errorf("noderoles: %q/%s: %w", a.def.Key, name, err)
+		}
+	}
+	return clamps, nil
+}
 
 // Close stops this node role: its duties are no longer scheduled, its waiting
 // work is shed, and Teardown runs. Idempotent.
@@ -454,7 +549,7 @@ func (rt *Runtime) Status() []RoleStatus {
 	out := make([]RoleStatus, 0, len(roles))
 	for _, a := range roles {
 		out = append(out, RoleStatus{
-			Key: a.def.Key, Limits: a.Limits, Clamps: a.Clamps, Governor: gov[a.def.Key], Duties: duties[a.def.Key],
+			Key: a.def.Key, Limits: a.Limits(), Clamps: a.Clamps(), Governor: gov[a.def.Key], Duties: duties[a.def.Key],
 			Unauthorized: a.unauthorized.Load(), NotHeld: a.notHeld.Load(),
 		})
 	}

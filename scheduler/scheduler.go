@@ -149,6 +149,8 @@ type DutyStats struct {
 	LastSlot    time.Time
 	NextSlot    time.Time
 	InFlight    int
+	// Disabled is true while SetEnabled(false) is in force.
+	Disabled bool
 }
 
 // Scheduler decides when duties are due.
@@ -179,6 +181,16 @@ type state struct {
 	pending  *Fire
 	removed  bool
 	stats    DutyStats
+
+	// schedule and disabled can change while the scheduler runs (Reschedule,
+	// SetEnabled), so they live here, under mu, and not in the duty.
+	schedule recurrence.Schedule
+	disabled bool
+	// gen counts changes to the schedule or enabled state. A timer callback
+	// that was already running when one happened carries the old generation
+	// and does nothing, so a stale occurrence is never fired and a second
+	// chain of timers is never started.
+	gen int
 }
 
 var (
@@ -250,7 +262,7 @@ func (s *Scheduler) Add(d Duty) error {
 		s.mu.Unlock()
 		return ErrDuplicateDuty
 	}
-	st := &state{s: s, duty: d, stats: DutyStats{Role: d.Role, Name: d.Name}}
+	st := &state{s: s, duty: d, schedule: d.Schedule, stats: DutyStats{Role: d.Role, Name: d.Name}}
 	s.duties[k] = st
 	started := s.started
 	s.mu.Unlock()
@@ -293,6 +305,81 @@ func (s *Scheduler) Start() error {
 		st.begin()
 	}
 	s.Emit(EventStart)
+	return nil
+}
+
+var errNoSuchDuty = errors.New("scheduler: no such duty")
+
+// Reschedule replaces a duty's schedule with one that applies from now: the
+// pending occurrence is cancelled and the next one is the first of the new
+// schedule after the present, so a changed interval takes effect at once
+// and does not wait out the old one. A nil schedule leaves the duty driven
+// by its events alone. The catch-up record is untouched.
+func (s *Scheduler) Reschedule(role, name string, sched recurrence.Schedule) error {
+	s.mu.Lock()
+	st := s.duties[[2]string{role, name}]
+	started := s.started
+	s.mu.Unlock()
+	if st == nil {
+		return errNoSuchDuty
+	}
+	st.mu.Lock()
+	if sched == nil && len(st.duty.Events) == 0 {
+		st.mu.Unlock()
+		return fmt.Errorf("scheduler: duty %s/%s would have neither a schedule nor events", role, name)
+	}
+	st.schedule = sched
+	st.gen++
+	if st.timer != nil {
+		st.timer.Stop()
+		st.timer = nil
+	}
+	if st.retry != nil {
+		st.retry.Stop()
+		st.retry = nil
+	}
+	st.stats.NextSlot = time.Time{}
+	if started {
+		st.armLocked(s.clock.Now())
+	}
+	st.mu.Unlock()
+	return nil
+}
+
+// SetEnabled turns a duty off or on. A disabled duty fires nothing, from its
+// schedule or its events, and anything waiting to be re-offered or queued is
+// dropped; turning it on again resumes from the present, with no catch-up.
+func (s *Scheduler) SetEnabled(role, name string, enabled bool) error {
+	s.mu.Lock()
+	st := s.duties[[2]string{role, name}]
+	started := s.started
+	s.mu.Unlock()
+	if st == nil {
+		return errNoSuchDuty
+	}
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if st.disabled == !enabled {
+		return nil
+	}
+	st.disabled = !enabled
+	st.gen++
+	if !enabled {
+		if st.timer != nil {
+			st.timer.Stop()
+			st.timer = nil
+		}
+		if st.retry != nil {
+			st.retry.Stop()
+			st.retry = nil
+		}
+		st.pending = nil
+		st.stats.NextSlot = time.Time{}
+		return nil
+	}
+	if started {
+		st.armLocked(s.clock.Now())
+	}
 	return nil
 }
 
@@ -352,6 +439,7 @@ func (s *Scheduler) Stats() []DutyStats {
 		st.mu.Lock()
 		cp := st.stats
 		cp.InFlight = st.inFlight
+		cp.Disabled = st.disabled
 		st.mu.Unlock()
 		out = append(out, cp)
 	}
@@ -365,7 +453,10 @@ func (st *state) fireOf(slot time.Time, catchUp bool, missed int) Fire {
 // begin catches up on what was missed, then arms the next occurrence.
 func (st *state) begin() {
 	d := st.duty
-	if d.Schedule == nil {
+	st.mu.Lock()
+	sched, disabled := st.schedule, st.disabled
+	st.mu.Unlock()
+	if sched == nil || disabled {
 		return
 	}
 	s := st.s
@@ -376,7 +467,7 @@ func (st *state) begin() {
 	}
 	var missed []time.Time
 	if found && err == nil {
-		missed = recurrence.Between(d.Schedule, last, now, 1000)
+		missed = recurrence.Between(sched, last, now, 1000)
 	}
 	switch {
 	case len(missed) == 0:
@@ -429,15 +520,15 @@ func (st *state) countMissed(n int) {
 // whose (jittered) time has already passed are counted as missed rather than
 // fired in a burst.
 func (st *state) armLocked(from time.Time) {
-	if st.removed || st.duty.Schedule == nil {
+	if st.removed || st.disabled || st.schedule == nil {
 		return
 	}
 	s := st.s
 	now := s.clock.Now()
-	next, ok := st.duty.Schedule.Next(from)
+	next, ok := st.schedule.Next(from)
 	for i := 0; ok && next.Add(st.duty.Jitter).Before(now) && i < 10000; i++ {
 		st.stats.MissedSlots++
-		next, ok = st.duty.Schedule.Next(next)
+		next, ok = st.schedule.Next(next)
 	}
 	if !ok {
 		st.stats.NextSlot = time.Time{}
@@ -451,13 +542,16 @@ func (st *state) armLocked(from time.Time) {
 	if delay < 0 {
 		delay = 0
 	}
-	slot := next
-	st.timer = s.clock.AfterFunc(delay, func() { st.onTimer(slot) })
+	slot, gen := next, st.gen
+	if st.timer != nil {
+		st.timer.Stop()
+	}
+	st.timer = s.clock.AfterFunc(delay, func() { st.onTimer(slot, gen) })
 }
 
-func (st *state) onTimer(slot time.Time) {
+func (st *state) onTimer(slot time.Time, gen int) {
 	st.mu.Lock()
-	if st.removed {
+	if st.removed || st.gen != gen {
 		st.mu.Unlock()
 		return
 	}
@@ -485,7 +579,7 @@ func (st *state) stop() {
 // fire applies the overlap policy, then offers the run.
 func (st *state) fire(f Fire) {
 	st.mu.Lock()
-	if st.removed {
+	if st.removed || st.disabled {
 		st.mu.Unlock()
 		return
 	}

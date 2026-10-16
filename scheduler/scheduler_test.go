@@ -549,3 +549,172 @@ func TestFailuresAreCountedAndDoNotStopTheSchedule(t *testing.T) {
 		t.Errorf("stats %+v", st)
 	}
 }
+
+func TestRescheduleChangesTheCadenceFromNowNotAfterTheOldOne(t *testing.T) {
+	e := setup(t)
+	e.add(t, Duty{Schedule: every(t, time.Hour)})
+	e.start(t)
+	e.clk.Advance(10 * time.Minute) // the first hourly occurrence is 50 minutes away
+	rs, err := recurrence.Every(time.Minute, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := e.s.Reschedule("role", "duty", rs); err != nil {
+		t.Fatal(err)
+	}
+	e.clk.Advance(3*time.Minute + time.Second)
+	if got := e.rec.count(); got != 3 {
+		t.Errorf("%d runs in the 3 minutes after rescheduling to every minute; the old hourly slot should not be waited out", got)
+	}
+	if st := e.s.Stats()[0]; st.NextSlot.IsZero() {
+		t.Error("no next occurrence after rescheduling")
+	}
+}
+
+func TestRescheduleBeforeStartAppliesAtStartAndValidatesItsInputs(t *testing.T) {
+	e := setup(t)
+	e.add(t, Duty{Schedule: every(t, time.Hour)})
+	fast, _ := recurrence.Every(time.Minute, t0)
+	if err := e.s.Reschedule("role", "duty", fast); err != nil {
+		t.Fatal(err)
+	}
+	e.start(t)
+	e.clk.Advance(2*time.Minute + time.Second)
+	if e.rec.count() != 2 {
+		t.Errorf("runs = %d; the schedule set before Start was ignored", e.rec.count())
+	}
+	if err := e.s.Reschedule("role", "nope", fast); err == nil {
+		t.Error("rescheduled a duty that does not exist")
+	}
+	if err := e.s.Reschedule("role", "duty", nil); err == nil {
+		t.Error("a duty with no events was left with no schedule")
+	}
+	e.add(t, Duty{Name: "evented", Events: []string{"x"}})
+	if err := e.s.Reschedule("role", "evented", nil); err != nil {
+		t.Errorf("an events-only duty with a nil schedule: %v", err)
+	}
+}
+
+func TestDisablingADutyStopsItsScheduleAndItsEventsAndEnablingResumesFromNow(t *testing.T) {
+	e := setup(t)
+	e.add(t, Duty{Schedule: every(t, time.Minute), Events: []string{"poke"}})
+	e.start(t)
+	e.clk.Advance(time.Minute)
+	if e.rec.count() != 1 {
+		t.Fatal("setup")
+	}
+	if err := e.s.SetEnabled("role", "duty", false); err != nil {
+		t.Fatal(err)
+	}
+	if e.clk.Pending() != 0 {
+		t.Errorf("%d timers pending immediately after disabling: the timer itself must be stopped, not merely ignored when it fires", e.clk.Pending())
+	}
+	e.clk.Advance(5 * time.Minute)
+	e.s.Emit("poke")
+	if e.rec.count() != 1 {
+		t.Errorf("a disabled duty ran: %d", e.rec.count())
+	}
+	if st := e.s.Stats()[0]; !st.Disabled || !st.NextSlot.IsZero() {
+		t.Errorf("stats %+v", st)
+	}
+	if e.clk.Pending() != 0 {
+		t.Errorf("%d timers left for a disabled duty", e.clk.Pending())
+	}
+	if err := e.s.SetEnabled("role", "duty", false); err != nil {
+		t.Errorf("disabling twice: %v", err)
+	}
+
+	if err := e.s.SetEnabled("role", "duty", true); err != nil {
+		t.Fatal(err)
+	}
+	e.clk.Advance(time.Minute)
+	if e.rec.count() != 2 {
+		t.Errorf("runs = %d after re-enabling; it should resume from now, one run in the next minute, with no catch-up of the 5 it was off", e.rec.count())
+	}
+	e.s.Emit("poke")
+	if e.rec.count() != 3 {
+		t.Errorf("events do not work after re-enabling: %d", e.rec.count())
+	}
+	if err := e.s.SetEnabled("role", "nope", true); err == nil {
+		t.Error("enabled a duty that does not exist")
+	}
+}
+
+// A timer callback that is already running when the schedule changes belongs
+// to the old schedule and must do nothing; and changes made from other
+// goroutines while time moves must not race or double the timer chain.
+func TestChangingTheScheduleWhileTimersFireNeitherRacesNorDoublesTheChain(t *testing.T) {
+	e := setup(t)
+	e.add(t, Duty{Schedule: every(t, time.Second), Overlap: OverlapAllow})
+	e.start(t)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			rs, _ := recurrence.Every(time.Duration(1+i%3)*time.Second, time.Time{})
+			_ = e.s.Reschedule("role", "duty", rs)
+			_ = e.s.SetEnabled("role", "duty", i%5 != 0)
+			_ = e.s.Stats()
+			time.Sleep(100 * time.Microsecond)
+		}
+	}()
+	for i := 0; i < 300; i++ {
+		e.clk.Advance(500 * time.Millisecond)
+	}
+	close(stop)
+	wg.Wait()
+	_ = e.s.SetEnabled("role", "duty", true)
+	if e.clk.Pending() > 2 {
+		t.Errorf("%d timers pending for one duty: the chain was doubled", e.clk.Pending())
+	}
+}
+
+// White-box: the two defences against a timer callback that was already
+// running when the schedule changed, each shown to be needed on its own.
+func TestAStaleTimerCallbackDoesNothing(t *testing.T) {
+	e := setup(t)
+	e.add(t, Duty{Schedule: every(t, time.Minute)})
+	e.start(t)
+	st := e.s.duties[[2]string{"role", "duty"}]
+	st.mu.Lock()
+	oldGen, oldSlot := st.gen, st.stats.NextSlot
+	st.mu.Unlock()
+
+	slow, _ := recurrence.Every(time.Hour, time.Time{})
+	if err := e.s.Reschedule("role", "duty", slow); err != nil {
+		t.Fatal(err)
+	}
+	pending := e.clk.Pending()
+	st.onTimer(oldSlot, oldGen) // the callback of the schedule that was just replaced, arriving late
+	if e.rec.count() != 0 {
+		t.Errorf("a stale occurrence was fired: %v", slotsOf(e.rec.snapshot()))
+	}
+	if e.clk.Pending() != pending {
+		t.Errorf("a stale callback started another timer: %d pending, was %d", e.clk.Pending(), pending)
+	}
+}
+
+func TestArmingAgainReplacesThePendingTimerInsteadOfAddingOne(t *testing.T) {
+	e := setup(t)
+	e.add(t, Duty{Schedule: every(t, time.Minute)})
+	e.start(t)
+	st := e.s.duties[[2]string{"role", "duty"}]
+	st.mu.Lock()
+	st.armLocked(e.clk.Now())
+	st.armLocked(e.clk.Now())
+	st.mu.Unlock()
+	if e.clk.Pending() != 1 {
+		t.Errorf("%d timers pending for one duty after arming repeatedly", e.clk.Pending())
+	}
+	e.clk.Advance(time.Minute)
+	if e.rec.count() != 1 {
+		t.Errorf("one occurrence fired %d times", e.rec.count())
+	}
+}

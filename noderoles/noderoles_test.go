@@ -137,8 +137,8 @@ func TestAnAdoptedNodeRolesDutiesRunThroughTheGovernorOnSchedule(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ad.Limits.Concurrency != 1 || len(ad.Clamps) != 0 {
-		t.Errorf("limits %+v clamps %v", ad.Limits, ad.Clamps)
+	if ad.Limits().Concurrency != 1 || len(ad.Clamps()) != 0 {
+		t.Errorf("limits %+v clamps %v", ad.Limits(), ad.Clamps())
 	}
 	if err := e.rt.Start(); err != nil {
 		t.Fatal(err)
@@ -183,8 +183,8 @@ func TestTheNodeCeilingCapsABudgetAndTheAdoptionSaysSo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ad.Limits.Concurrency != 2 || len(ad.Clamps) != 1 || ad.Clamps[0].By != "node" {
-		t.Errorf("limits %+v clamps %v: tier high asks for 4, the node allows 2", ad.Limits, ad.Clamps)
+	if ad.Limits().Concurrency != 2 || len(ad.Clamps()) != 1 || ad.Clamps()[0].By != "node" {
+		t.Errorf("limits %+v clamps %v: tier high asks for 4, the node allows 2", ad.Limits(), ad.Clamps())
 	}
 	if st := e.rt.Status()[0]; len(st.Clamps) != 1 {
 		t.Errorf("status does not surface the clamp: %+v", st.Clamps)
@@ -524,5 +524,118 @@ func TestAnnotateShapesTheContextEachRunReceives(t *testing.T) {
 	got := []string{recv(t, "the scheduled run", seen), recv(t, "the event run", seen)}
 	if got[0] != "myapp.annotated/w scheduled" || got[1] != "myapp.annotated/w event:poke" {
 		t.Errorf("contexts %v", got)
+	}
+}
+
+func TestReconfigureAppliesABudgetASchedulesAndTheEnabledStateToARunningNodeRole(t *testing.T) {
+	e := setup(t, governor.Ceiling{Concurrency: 2})
+	var c counter
+	ad, err := e.rt.Adopt(context.Background(), def("myapp.live", &c, every(t, time.Hour)), Adoption{Budget: governor.Adoption{Tier: governor.TierLow}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.rt.Start()
+	if ad.Base().Concurrency != 1 {
+		t.Fatalf("Base = %+v; the adoption stated tier low", ad.Base())
+	}
+
+	// A new budget: over the node ceiling in one dimension, so it is capped and told so.
+	clamps, err := ad.Reconfigure(Update{Budget: &governor.Limits{Concurrency: 8, QueueDepth: 3}})
+	if err != nil || len(clamps) != 1 || clamps[0].By != "node" {
+		t.Fatalf("Reconfigure budget: clamps %v err %v", clamps, err)
+	}
+	if got := ad.Limits(); got.Concurrency != 2 || got.QueueDepth != 3 {
+		t.Errorf("Limits = %+v", got)
+	}
+	if ad.Base().Concurrency != 1 {
+		t.Errorf("Base changed to %+v: it is what the node consented to, not what was last requested", ad.Base())
+	}
+
+	// A new schedule applies from now; the hour-long one is never waited out.
+	if _, err := ad.Reconfigure(Update{Schedules: map[string]recurrence.Schedule{"work": every(t, time.Minute)}}); err != nil {
+		t.Fatal(err)
+	}
+	e.tick(t)
+	e.tick(t)
+	waitFor(t, "two runs on the new schedule", func() bool { return c.n.Load() == 2 })
+
+	// Disabled: nothing runs; enabled again: it resumes.
+	if _, err := ad.Reconfigure(Update{Enabled: map[string]bool{"work": false}}); err != nil {
+		t.Fatal(err)
+	}
+	e.clk.Advance(5 * time.Minute)
+	if c.n.Load() != 2 {
+		t.Errorf("a disabled duty ran (%d runs)", c.n.Load())
+	}
+	if st := e.rt.Status()[0]; !st.Duties[0].Disabled {
+		t.Errorf("status does not show the duty disabled: %+v", st.Duties[0])
+	}
+	if _, err := ad.Reconfigure(Update{Enabled: map[string]bool{"work": true}}); err != nil {
+		t.Fatal(err)
+	}
+	e.tick(t)
+	waitFor(t, "the resumed run", func() bool { return c.n.Load() == 3 })
+}
+
+func TestReconfigureAppliesNothingIfAnyNamedDutyDoesNotExist(t *testing.T) {
+	e := setup(t, governor.Ceiling{Concurrency: 4})
+	var c counter
+	ad, err := e.rt.Adopt(context.Background(), def("myapp.atomic", &c, every(t, time.Hour)), tierLow())
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := ad.Limits()
+	_, err = ad.Reconfigure(Update{
+		Budget:    &governor.Limits{Concurrency: 3},
+		Schedules: map[string]recurrence.Schedule{"nosuchduty": every(t, time.Minute)},
+	})
+	if err == nil {
+		t.Fatal("a schedule for a duty that does not exist was accepted")
+	}
+	if ad.Limits() != before {
+		t.Errorf("the budget changed (%+v -> %+v) although the update was refused", before, ad.Limits())
+	}
+	if _, err := ad.Reconfigure(Update{Enabled: map[string]bool{"nosuchduty": false}}); err == nil {
+		t.Error("enabling a duty that does not exist was accepted")
+	}
+	if _, err := ad.Reconfigure(Update{Budget: &governor.Limits{}}); err == nil {
+		t.Error("an invalid budget was accepted")
+	}
+}
+
+func TestDefaultSchedulesAndTheAdoptedListAreWhatWasAdopted(t *testing.T) {
+	e := setup(t, governor.Ceiling{Concurrency: 4})
+	var c counter
+	own := every(t, time.Hour)
+	override := every(t, time.Minute)
+	a1, err := e.rt.Adopt(context.Background(), def("myapp.one", &c, own), tierLow())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ad2 := tierLow()
+	ad2.Schedules = map[string]recurrence.Schedule{"work": override}
+	a2, err := e.rt.Adopt(context.Background(), def("myapp.two", &c, own), ad2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a1.DefaultSchedule("work") != own || a2.DefaultSchedule("work") != override {
+		t.Error("DefaultSchedule is not the schedule the duty was adopted with (the duty's own, or the adoption's override)")
+	}
+	if a1.DefaultSchedule("nosuchduty") != nil {
+		t.Error("a duty that does not exist has a default schedule")
+	}
+	// Listed in key order every time, whatever order they were adopted in.
+	for i := 0; i < 20; i++ {
+		got := e.rt.Adopted()
+		if len(got) != 2 || got[0].Key() != "myapp.one" || got[1].Key() != "myapp.two" {
+			t.Fatalf("Adopted lists %d node roles, not myapp.one then myapp.two", len(got))
+		}
+	}
+	a1.Close(context.Background())
+	if got := e.rt.Adopted(); len(got) != 1 || got[0].Key() != "myapp.two" {
+		t.Errorf("after closing one: %d listed", len(got))
+	}
+	if a1.Key() != "myapp.one" || a1.Definition().Key != "myapp.one" {
+		t.Error("Key or Definition wrong")
 	}
 }

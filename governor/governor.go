@@ -246,17 +246,7 @@ func (g *Governor) Register(spec RoleSpec) (*Role, error) {
 	if _, dup := g.roles[k]; dup {
 		return nil, ErrDuplicateRole
 	}
-	limits, clamps := spec.Requested, []Clamp(nil)
-	var dom *level
-	if c, ok := g.ceilings[spec.Domain]; ok {
-		var cl []Clamp
-		limits, cl = ClampTo(limits, c, "domain")
-		clamps = append(clamps, cl...)
-		dom = g.domains[spec.Domain]
-	}
-	var cl []Clamp
-	limits, cl = ClampTo(limits, g.nodeCeil, "node")
-	clamps = append(clamps, cl...)
+	limits, clamps, dom := g.clampLocked(spec.Requested, spec.Domain)
 	for _, c := range clamps {
 		g.log.Warn("a node role's budget was capped", "node_role", spec.Key, "domain", spec.Domain, "clamp", c.String())
 	}
@@ -265,11 +255,63 @@ func (g *Governor) Register(spec RoleSpec) (*Role, error) {
 	return r, nil
 }
 
+// clampLocked applies the domain share, then the node ceiling, to a request.
+func (g *Governor) clampLocked(requested Limits, domain string) (Limits, []Clamp, *level) {
+	limits := requested
+	var clamps []Clamp
+	var dom *level
+	if c, ok := g.ceilings[domain]; ok {
+		var cl []Clamp
+		limits, cl = ClampTo(limits, c, "domain")
+		clamps = append(clamps, cl...)
+		dom = g.domains[domain]
+	}
+	limits, cl := ClampTo(limits, g.nodeCeil, "node")
+	return limits, append(clamps, cl...), dom
+}
+
 // Limits are what the node role really runs under.
-func (r *Role) Limits() Limits { return r.limits }
+func (r *Role) Limits() Limits {
+	r.g.mu.Lock()
+	defer r.g.mu.Unlock()
+	return r.limits
+}
 
 // Clamps lists the dimensions a ceiling reduced, empty if none.
-func (r *Role) Clamps() []Clamp { return append([]Clamp(nil), r.clamps...) }
+func (r *Role) Clamps() []Clamp {
+	r.g.mu.Lock()
+	defer r.g.mu.Unlock()
+	return append([]Clamp(nil), r.clamps...)
+}
+
+// Reconfigure replaces what the node role asks for, for a budget that changes
+// while the node runs (a Policy value changed). The domain share and node
+// ceiling apply to the new request exactly as at registration, and what they
+// cap is returned and logged. Work already running is never disturbed: if the
+// concurrency shrinks, new work waits until enough has finished. Work already
+// waiting stays queued even if the queue depth shrinks below it; it is the new
+// arrivals that are shed.
+func (r *Role) Reconfigure(requested Limits) ([]Clamp, error) {
+	if err := requested.Validate(); err != nil {
+		return nil, fmt.Errorf("node role %q: %w", r.spec.Key, err)
+	}
+	g := r.g
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if r.removed {
+		return nil, errors.New("governor: the node role was removed")
+	}
+	limits, clamps, _ := g.clampLocked(requested, r.spec.Domain)
+	for _, c := range clamps {
+		g.log.Warn("a node role's budget was capped", "node_role", r.spec.Key, "domain", r.spec.Domain, "clamp", c.String())
+	}
+	r.limits, r.clamps = limits, clamps
+	if !limits.Rate.set() {
+		r.starts = nil
+	}
+	g.dispatchLocked(time.Now()) // more room may mean waiting work can start
+	return append([]Clamp(nil), clamps...), nil
+}
 
 // Unregister removes the node role: its waiting work is shed, and its
 // running work finishes.
@@ -513,12 +555,13 @@ func (g *Governor) startLocked(it *item, now time.Time) {
 	r.counters.Started++
 	waited := now.Sub(it.queued)
 
+	timeout := r.limits.RunTimeout // read now, under the lock: Reconfigure may change it
 	g.wg.Add(1)
 	go func() {
 		defer g.wg.Done()
 		ctx, cancel := g.baseCtx, context.CancelFunc(func() {})
-		if r.limits.RunTimeout > 0 {
-			ctx, cancel = context.WithTimeout(g.baseCtx, r.limits.RunTimeout)
+		if timeout > 0 {
+			ctx, cancel = context.WithTimeout(g.baseCtx, timeout)
 		}
 		began := time.Now()
 		err := safely(ctx, it.work.Run)

@@ -618,3 +618,196 @@ func TestStressNeverExceedsAnyLevelAndAccountsForEverything(t *testing.T) {
 		t.Error("the stress run started nothing")
 	}
 }
+
+func TestReconfigureGrowingConcurrencyStartsWaitingWork(t *testing.T) {
+	g := newGov(t, Config{Node: Ceiling{Concurrency: 10}})
+	r := role(t, g, "r", "d", Limits{Concurrency: 1, QueueDepth: 5}, Normal)
+	hold := newGate()
+	first := mustSubmit(t, r, Work{Duty: "a", Run: hold.run})
+	hold.waitStarted(t, 1)
+	second := mustSubmit(t, r, Work{Duty: "b", Run: hold.run})
+	select {
+	case <-hold.started:
+		t.Fatal("the second ran with the only slot taken")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if _, err := r.Reconfigure(Limits{Concurrency: 2, QueueDepth: 5}); err != nil {
+		t.Fatal(err)
+	}
+	hold.waitStarted(t, 1) // the waiting work took the new room without anything finishing
+	if r.Limits().Concurrency != 2 {
+		t.Errorf("Limits = %+v", r.Limits())
+	}
+	close(hold.release)
+	wait(t, first)
+	wait(t, second)
+}
+
+func TestReconfigureShrinkingNeverDisturbsRunningWorkAndHoldsNewWork(t *testing.T) {
+	g := newGov(t, Config{Node: Ceiling{Concurrency: 10}})
+	r := role(t, g, "r", "d", Limits{Concurrency: 3, QueueDepth: 10}, Normal)
+	hold := newGate()
+	var running []*Ticket
+	for i := 0; i < 3; i++ {
+		running = append(running, mustSubmit(t, r, Work{Duty: "run", Run: hold.run}))
+	}
+	hold.waitStarted(t, 3)
+	if _, err := r.Reconfigure(Limits{Concurrency: 1, QueueDepth: 10}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tk := range running {
+		select {
+		case <-tk.Done():
+			t.Fatal("shrinking the budget ended work that was running")
+		default:
+		}
+	}
+	queued := mustSubmit(t, r, Work{Duty: "new", Run: func(context.Context) error { return nil }})
+	hold.release <- struct{}{} // one finishes: 2 still running, above the new limit of 1
+	hold.release <- struct{}{} // two finished: 1 running, which is the limit
+	select {
+	case <-queued.Done():
+		t.Fatal("new work started while the role was still at or over its new limit")
+	case <-time.After(80 * time.Millisecond):
+	}
+	hold.release <- struct{}{} // none running: now there is room
+	if res := wait(t, queued); res.State != Completed {
+		t.Errorf("queued work after the shrink: %+v", res)
+	}
+}
+
+func TestReconfigureShrinkingTheQueueShedsNewArrivalsNotWhatWaits(t *testing.T) {
+	g := newGov(t, Config{Node: Ceiling{Concurrency: 10}})
+	r := role(t, g, "r", "d", Limits{Concurrency: 1, QueueDepth: 5}, Normal)
+	hold := newGate()
+	running := mustSubmit(t, r, Work{Duty: "hold", Run: hold.run})
+	hold.waitStarted(t, 1)
+	var waiting []*Ticket
+	for i := 0; i < 3; i++ {
+		waiting = append(waiting, mustSubmit(t, r, Work{Duty: "w", Run: func(context.Context) error { return nil }}))
+	}
+	if _, err := r.Reconfigure(Limits{Concurrency: 1, QueueDepth: 1}); err != nil {
+		t.Fatal(err)
+	}
+	for _, tk := range waiting {
+		select {
+		case <-tk.Done():
+			t.Fatal("work already waiting was shed by a smaller queue")
+		default:
+		}
+	}
+	late := mustSubmit(t, r, Work{Duty: "late", Run: func(context.Context) error { return nil }})
+	if res := wait(t, late); res.State != Shed || res.Reason != ShedQueueFull {
+		t.Errorf("a new arrival over the smaller queue: %+v", res)
+	}
+	close(hold.release)
+	wait(t, running)
+	for _, tk := range waiting {
+		if res := wait(t, tk); res.State != Completed {
+			t.Errorf("work that was waiting: %+v", res)
+		}
+	}
+}
+
+func TestReconfigureAppliesTheCeilingsAgainAndRejectsWhatItMust(t *testing.T) {
+	g := newGov(t, Config{Node: Ceiling{Concurrency: 2}})
+	r := role(t, g, "r", "d", Limits{Concurrency: 1}, Normal)
+	clamps, err := r.Reconfigure(Limits{Concurrency: 9})
+	if err != nil || len(clamps) != 1 || clamps[0].By != "node" || r.Limits().Concurrency != 2 {
+		t.Fatalf("a request over the node ceiling: clamps %v err %v limits %+v", clamps, err, r.Limits())
+	}
+	if clamps, err := r.Reconfigure(Limits{Concurrency: 1}); err != nil || len(clamps) != 0 || len(r.Clamps()) != 0 {
+		t.Errorf("a request within the ceiling kept stale clamps: %v %v", clamps, r.Clamps())
+	}
+	if _, err := r.Reconfigure(Limits{}); err == nil {
+		t.Error("invalid limits were accepted")
+	}
+	if r.Limits().Concurrency != 1 {
+		t.Error("a rejected Reconfigure changed the limits")
+	}
+	r.Unregister()
+	if _, err := r.Reconfigure(Limits{Concurrency: 1}); err == nil {
+		t.Error("a removed role was reconfigured")
+	}
+}
+
+func TestReconfigureAddingARateLimitTakesEffect(t *testing.T) {
+	g := newGov(t, Config{Node: Ceiling{Concurrency: 10}})
+	r := role(t, g, "r", "d", Limits{Concurrency: 5, QueueDepth: 10}, Normal)
+	if _, err := r.Reconfigure(Limits{Concurrency: 5, QueueDepth: 10, Rate: Rate{Starts: 1, Per: 150 * time.Millisecond}}); err != nil {
+		t.Fatal(err)
+	}
+	var mu sync.Mutex
+	var starts []time.Time
+	var tickets []*Ticket
+	for i := 0; i < 2; i++ {
+		tickets = append(tickets, mustSubmit(t, r, Work{Duty: "w", Run: func(context.Context) error {
+			mu.Lock()
+			starts = append(starts, time.Now())
+			mu.Unlock()
+			return nil
+		}}))
+	}
+	for _, tk := range tickets {
+		wait(t, tk)
+	}
+	if gap := starts[1].Sub(starts[0]); gap < 140*time.Millisecond {
+		t.Errorf("starts %v apart; a rate of 1 per 150ms was ignored after Reconfigure", gap)
+	}
+}
+
+// Reconfigure while work is being submitted and finishing, under the race
+// detector: the limits are read by the dispatcher, the run goroutines and
+// the accessors, and must never be seen half-changed.
+func TestReconfigureRacesSafelyWithSubmissionAndCompletion(t *testing.T) {
+	g := newGov(t, Config{Node: Ceiling{Concurrency: 6}})
+	r := role(t, g, "r", "d", Limits{Concurrency: 3, QueueDepth: 10}, Normal)
+	var k track
+	stop := time.Now().Add(400 * time.Millisecond)
+	var wg sync.WaitGroup
+	var tickets []*Ticket
+	var mu sync.Mutex
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		for i := 0; time.Now().Before(stop); i++ {
+			_, _ = r.Reconfigure(Limits{Concurrency: 1 + i%5, QueueDepth: i % 8, RunTimeout: time.Duration(i%3) * time.Second})
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	go func() { // a different goroutine reading while the first writes
+		defer wg.Done()
+		for time.Now().Before(stop) {
+			_ = r.Limits()
+			_ = r.Clamps()
+			_ = g.Stats()
+			time.Sleep(200 * time.Microsecond)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for time.Now().Before(stop) {
+			tk, err := r.Submit(Work{Duty: "w", Run: func(ctx context.Context) error {
+				k.enter()
+				defer k.leave()
+				time.Sleep(time.Millisecond)
+				return nil
+			}})
+			if err != nil {
+				t.Errorf("Submit: %v", err)
+				return
+			}
+			mu.Lock()
+			tickets = append(tickets, tk)
+			mu.Unlock()
+			time.Sleep(200 * time.Microsecond)
+		}
+	}()
+	wg.Wait()
+	for _, tk := range tickets {
+		wait(t, tk)
+	}
+	if k.max.Load() > 5 {
+		t.Errorf("%d ran at once; the most any configuration allowed was 5", k.max.Load())
+	}
+}
