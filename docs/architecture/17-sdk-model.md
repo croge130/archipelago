@@ -30,7 +30,7 @@ Postgres-backed, so that wiring looks like:
    `gatehouse/facade.RegisterAssumePermissions`,
    `aliasauth.RegisterPermissions`, `vitalsauth.RegisterPermissions`,
    `jobsauth.RegisterPermissions`, `noderolesauth.RegisterPermissions`,
-   `noderolespolicy.EnsureDefinitions`,
+   `noderolespolicy.EnsureDefinitions`, `noderolesvitals.EnsureDefinitions`,
    `vitals/facade.SeedBuiltinDefinitions`,
    `vitalsdefaults.EnsurePolicyDefinition`.
 
@@ -202,7 +202,7 @@ enables just `Vitals` and gets the narrower set of seeding steps.
 | `Vitals` | `Stores.Vitals.Reader` | `SeedBuiltinDefinitions`; with `Gatehouse`: `vitalsauth.RegisterPermissions`; with `Policy`: `vitalsdefaults.EnsurePolicyDefinition` |
 | `Jobs` | `Stores.Jobs.Reader` | with `Gatehouse`: `jobsauth.RegisterPermissions`. Also enables `App.JobsAuth()`, which assembles `jobsauth.Deps` from the App's own stores (it needs both modes; a node holding only the jobs base uses its facade directly) |
 | `Certs` | `Stores.Certs.Reader` | — |
-| `NodeRoles` | `Config.NodeRoles`: the node-wide `Governor`, a `Domain`, and (with `Gatehouse`) the node's `PrincipalID`. No store of its own | with `Gatehouse`: `noderolesauth.RegisterPermissions` for `Config.NodeRoles.Definitions`. Also enables `App.NodeRoles()` (the domain's runtime, built once, nothing started), `App.AdoptNodeRole` and, with `Gatehouse` and a writer, `App.Membership` (see below). With `Policy`: `noderolespolicy.EnsureDefinitions`, and `App.NodeRolePolicy`, `ApplyNodeRolePolicy` and `NodeRolePolicyRefresh` |
+| `NodeRoles` | `Config.NodeRoles`: the node-wide `Governor`, a `Domain`, and (with `Gatehouse`) the node's `PrincipalID`. No store of its own | with `Gatehouse`: `noderolesauth.RegisterPermissions` for `Config.NodeRoles.Definitions`. Also enables `App.NodeRoles()` (the domain's runtime, built once, nothing started), `App.AdoptNodeRole` and, with `Gatehouse` and a writer, `App.Membership` (see below). With `Policy`: `noderolespolicy.EnsureDefinitions`, and `App.NodeRolePolicy`, `ApplyNodeRolePolicy` and `NodeRolePolicyRefresh`. With `Vitals` and a writer: `noderolesvitals.EnsureDefinitions`, and `App.NodeRoleVitals` and `NodeRoleVitalsReport` |
 | `SSOProvider` | the `Gatehouse` and `Certs` modes, plus `Config.SSOSigner` — the SDK never generates or stores this key itself, matching `12-sso-tickets-model.md`'s "never the mTLS key" rule | — |
 
 Only the **Reader** is required by `New`; a Writer is only needed by the
@@ -242,7 +242,14 @@ only writer.
    `NodeRolePolicyRefresh(every)` returns a node role (adopt it like any other)
    that re-applies policy to every adopted node role, which is how an edit
    reaches a running one.
-6. **Nothing is started by the SDK.** `App.NodeRoles()` returns the runtime
+6. **With `Vitals` on, status can be reported.** `NodeRoleVitalsReport(every)`
+   returns a node role (adopt it like any other) that writes each adopted node
+   role's status, and the governor's pressure, to Vitals every interval
+   (`noderolesvitals`). With `Gatehouse` on it writes as the node's principal,
+   which therefore needs `vitals.write` in the scope `node`/its own ID; without
+   permission the report fails closed and nothing is registered. With `Policy`
+   on, what policy could not apply as asked appears in each node role's reading.
+7. **Nothing is started by the SDK.** `App.NodeRoles()` returns the runtime
    and the caller starts and stops it when the node is ready.
 
 ## Status

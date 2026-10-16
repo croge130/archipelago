@@ -9,7 +9,8 @@ package sdk
 // registration, Vitals+Gatehouse enables vitalsauth's, Jobs+Gatehouse
 // enables jobsauth's, NodeRoles+Gatehouse enables noderolesauth's,
 // NodeRoles+Policy enables noderolespolicy's definitions and applies Policy to
-// each adopted node role, and Vitals+Policy enables vitalsdefaults' policy
+// each adopted node role, NodeRoles+Vitals enables noderolesvitals' definitions
+// and the reporter of node role status, and Vitals+Policy enables vitalsdefaults' policy
 // definition. A node can therefore run
 // Vitals without Gatehouse-core (a scoped node) and simply gets the
 // narrower set of seeding steps.

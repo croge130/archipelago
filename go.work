@@ -19,6 +19,7 @@ use (
 	./noderoles
 	./noderolesauth
 	./noderolespolicy
+	./noderolesvitals
 	./policy
 	./recurrence
 	./registry

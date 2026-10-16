@@ -59,6 +59,9 @@ type Binding struct {
 
 	mu    sync.Mutex
 	state map[string]*roleState
+
+	notesMu sync.Mutex
+	notes   map[string][]string
 }
 
 type roleState struct {
@@ -77,7 +80,7 @@ func NewBinding(cfg BindingConfig) (*Binding, error) {
 	if cfg.Store == nil {
 		return nil, fmt.Errorf("noderolespolicy: a Binding needs a policy Store")
 	}
-	b := &Binding{res: NewResolver(cfg.Store, cfg.Domain), clock: cfg.Clock, log: cfg.Logger, state: map[string]*roleState{}}
+	b := &Binding{res: NewResolver(cfg.Store, cfg.Domain), clock: cfg.Clock, log: cfg.Logger, state: map[string]*roleState{}, notes: map[string][]string{}}
 	if b.clock == nil {
 		b.clock = time.Now
 	}
@@ -104,6 +107,7 @@ func (b *Binding) Apply(ctx context.Context, a *noderoles.Adopted) (Report, erro
 	if err != nil {
 		b.log.Warn("node role policy could not be resolved; the node role keeps its current settings",
 			"role", key, "error", err)
+		b.setNotes(key, []string{"policy could not be read, so the node role keeps its current settings: " + err.Error()})
 		return Report{Role: key}, err
 	}
 
@@ -180,6 +184,7 @@ func (b *Binding) Apply(ctx context.Context, a *noderoles.Adopted) (Report, erro
 		next = append(next, pending{d.Name, nd})
 	}
 
+	b.setNotes(key, append(capNotes(resolved.Capped), rep.Notes...))
 	for _, c := range resolved.Capped {
 		b.log.Warn("policy asked for more than the node adopted; capped",
 			"role", key, "dimension", c.Dimension, "asked", c.Asked, "allowed", c.Allowed)
@@ -221,4 +226,34 @@ func (b *Binding) Forget(role string) {
 	b.mu.Lock()
 	delete(b.state, role)
 	b.mu.Unlock()
+	b.setNotes(role, nil)
+}
+
+// Notes says what policy could not apply as asked for a node role at its last
+// Apply: a request capped at the adoption, an interval raised to a duty's
+// floor, a value that does not fit the duty, or policy being unreadable. It is
+// empty when policy was applied as asked, and does not wait for an Apply in
+// progress.
+func (b *Binding) Notes(role string) []string {
+	b.notesMu.Lock()
+	defer b.notesMu.Unlock()
+	return append([]string(nil), b.notes[role]...)
+}
+
+func (b *Binding) setNotes(role string, notes []string) {
+	b.notesMu.Lock()
+	defer b.notesMu.Unlock()
+	if len(notes) == 0 {
+		delete(b.notes, role)
+		return
+	}
+	b.notes[role] = notes
+}
+
+func capNotes(caps []Cap) []string {
+	var out []string
+	for _, c := range caps {
+		out = append(out, c.String())
+	}
+	return out
 }

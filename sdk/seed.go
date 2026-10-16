@@ -10,6 +10,7 @@ import (
 	"github.com/croge130/archipelago/jobsauth"
 	"github.com/croge130/archipelago/noderolesauth"
 	"github.com/croge130/archipelago/noderolespolicy"
+	"github.com/croge130/archipelago/noderolesvitals"
 	vitalsFacade "github.com/croge130/archipelago/vitals/facade"
 	"github.com/croge130/archipelago/vitalsauth"
 	"github.com/croge130/archipelago/vitalsdefaults"
@@ -110,6 +111,11 @@ func (a *App) Seed(ctx context.Context) (SeedReport, error) {
 	if a.Modes.Vitals {
 		run("vitals.SeedBuiltinDefinitions", a.Vitals.Reader != nil && a.Vitals.Writer != nil, "no Vitals Writer", func() error {
 			return vitalsFacade.SeedBuiltinDefinitions(ctx, a.Vitals.Reader, a.Vitals.Writer)
+		})
+	}
+	if a.Modes.NodeRoles && a.Modes.Vitals {
+		run("noderolesvitals.EnsureDefinitions", a.Vitals.Reader != nil && a.Vitals.Writer != nil, "no Vitals Writer", func() error {
+			return noderolesvitals.EnsureDefinitions(ctx, a.Vitals.Reader, a.Vitals.Writer)
 		})
 	}
 	if a.Modes.Vitals && a.Modes.Policy {

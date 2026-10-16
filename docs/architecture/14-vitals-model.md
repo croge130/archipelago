@@ -349,6 +349,18 @@ integration, over Vitals + Gatehouse-core only — never importing
 Policy, same one-pair-per-package discipline as every other
 integration in this design.
 
+## A first producer: node role status
+
+`noderolesvitals` (a Layer 2 integration over Vitals + `noderoles`, see
+[`19`](19-node-roles-and-resource-governance-model.md)) is the first thing in
+the tree that reports into Vitals as a matter of course: one instance per
+adopted node role in the scope `node`/`<the node's principal>`, and one for the
+governor. It follows this base's own rules rather than bending them: summaries
+and reason codes are fixed phrases (history is kept only on a change of state,
+summary or reason, so numbers go in `DetailsJSON`), readings carry `ExpiresAt`
+so a silent node goes stale, and writes go through `vitalsauth` as the node's
+principal.
+
 ## What's deliberately out of scope (this pass)
 
 - **Notification hints.** Lighthouse deferred these past its own v0;

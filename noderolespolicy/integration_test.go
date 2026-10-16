@@ -645,3 +645,52 @@ func TestPolicyCannotDisableTheRefresherItself(t *testing.T) {
 		}
 	}
 }
+
+func TestNotesSayWhatPolicyCouldNotApplyAsAskedAndClearWhenItCan(t *testing.T) {
+	e := setup(t)
+	var sw, ev counter
+	ad := e.adopt(t, &sw, &ev)
+	if n := e.b.Notes("myapp.sweeper"); len(n) != 0 {
+		t.Fatalf("silent policy, yet notes %v", n)
+	}
+	e.set(t, KeyConcurrency, Global(), 50)
+	e.set(t, KeyScheduleInterval, Global(), 5.0)
+	e.apply(t, ad)
+	notes := strings.Join(e.b.Notes("myapp.sweeper"), "\n")
+	for _, want := range []string{"concurrency: policy asked 50", "duty \"sweep\": policy asked for every 5s", "\"onchange\""} {
+		if !strings.Contains(notes, want) {
+			t.Errorf("notes lack %q:\n%s", want, notes)
+		}
+	}
+	// Still true on a refresh that changes nothing: notes describe the policy
+	// as it stands, not only the Apply that acted on it.
+	e.apply(t, ad)
+	if len(e.b.Notes("myapp.sweeper")) == 0 {
+		t.Error("an unchanged refresh lost the notes")
+	}
+	e.clear(t, KeyConcurrency, Global())
+	e.clear(t, KeyScheduleInterval, Global())
+	e.apply(t, ad)
+	if n := e.b.Notes("myapp.sweeper"); len(n) != 0 {
+		t.Errorf("policy applies as asked again, yet notes %v", n)
+	}
+
+	// Policy unreadable: say so, and keep saying so until it can be read.
+	if _, err := e.pool.Pgx().Exec(ctx(), `ALTER TABLE policy_definitions RENAME TO policy_definitions_gone`); err != nil {
+		t.Fatal(err)
+	}
+	_, err := e.b.Apply(ctx(), ad)
+	if _, rerr := e.pool.Pgx().Exec(ctx(), `ALTER TABLE policy_definitions_gone RENAME TO policy_definitions`); rerr != nil {
+		t.Fatal(rerr)
+	}
+	if err == nil {
+		t.Fatal("premise: apply should fail")
+	}
+	if n := e.b.Notes("myapp.sweeper"); len(n) != 1 || !strings.Contains(n[0], "could not be read") {
+		t.Errorf("an unreadable policy must be a note: %v", n)
+	}
+	e.b.Forget("myapp.sweeper")
+	if n := e.b.Notes("myapp.sweeper"); len(n) != 0 {
+		t.Errorf("Forget left notes: %v", n)
+	}
+}

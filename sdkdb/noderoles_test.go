@@ -15,6 +15,7 @@ import (
 	"github.com/croge130/archipelago/governor"
 	"github.com/croge130/archipelago/noderoles"
 	"github.com/croge130/archipelago/noderolespolicy"
+	"github.com/croge130/archipelago/noderolesvitals"
 	"github.com/croge130/archipelago/recurrence"
 	"github.com/croge130/archipelago/scheduler"
 	"github.com/croge130/archipelago/sdk"
@@ -241,5 +242,123 @@ func TestPolicyShapesNodeRolesThroughTheSDKAtAdoptionAndAfterwards(t *testing.T)
 	}
 	if adopted.Base().Concurrency != 3 {
 		t.Fatalf("policy moved the adopted base: %+v", adopted.Base())
+	}
+}
+
+func TestNodeRoleStatusReachesVitalsThroughTheSDKAsTheNodeAndOnlyWithPermission(t *testing.T) {
+	modes := sdk.Modes{Gatehouse: true, Policy: true, Vitals: true, NodeRoles: true}
+	stores, pool := openStores(t, modes)
+	setupCtx := ctx5(t)
+	node, err := gatehouseFacade.EnsurePrincipal(setupCtx, stores.Gatehouse.Reader, stores.Gatehouse.Writer, "node.vitals", gatehouseStructure.PrincipalTypeServiceAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gov, err := governor.New(governor.Config{Node: governor.Ceiling{Concurrency: 8}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(gov.Close)
+	clk := scheduler.NewManualClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	hourly, _ := recurrence.Every(time.Hour, time.Time{})
+	sweeper := noderoles.Definition{
+		Key: "myapp.sweeper", Default: &governor.Limits{Concurrency: 3, QueueDepth: 3},
+		Duties: []noderoles.Duty{{Name: "sweep", Schedule: hourly, Run: func(context.Context, scheduler.Fire) error { return nil }}},
+	}
+	app, err := sdk.New(stores, modes, sdk.Config{NodeRoles: &sdk.NodeRoleConfig{
+		Governor: gov, Domain: "d", PrincipalID: node.PrincipalID, Clock: clk, Definitions: []noderoles.Definition{sweeper},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := app.Seed(setupCtx)
+	if err != nil {
+		t.Fatalf("Seed: %v (%+v)", err, report)
+	}
+	var ensured bool
+	for _, s := range report {
+		ensured = ensured || (s.Name == "noderolesvitals.EnsureDefinitions" && s.Status == sdk.SeedRan)
+	}
+	if !ensured {
+		t.Fatalf("Seed did not register the node role vitals definitions: %+v", report)
+	}
+	rt, err := app.NodeRoles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rt.Stop(context.Background()) })
+
+	// Policy asks for more than the node adopted; the reading should say so.
+	if _, err := noderolespolicy.Set(setupCtx, stores.Policy.Reader, stores.Policy.Writer, noderolespolicy.KeyConcurrency,
+		noderolespolicy.ForRole("myapp.sweeper"), 50, "operator:test"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.AdoptNodeRole(setupCtx, sweeper, noderoles.Adoption{Budget: governor.Adoption{UseDefault: true}}); err != nil {
+		t.Fatal(err)
+	}
+	reportRole, err := app.NodeRoleVitalsReport(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.AdoptNodeRole(setupCtx, reportRole, noderoles.Adoption{Budget: governor.Adoption{UseDefault: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.Start(); err != nil {
+		t.Fatal(err)
+	}
+
+	scope := node.PrincipalID.String()
+	instanceFor := func() (found bool) {
+		_, found, err := stores.Vitals.Reader.GetInstanceByScopeKey(setupCtx, "node", scope, "noderole.myapp.sweeper")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return found
+	}
+
+	// No permission to write in its own scope: the report fails closed.
+	clk.Advance(time.Minute)
+	waitIdle(t, rt, gov)
+	if instanceFor() {
+		t.Fatal("a node with no permission to write vitals registered an instance")
+	}
+
+	if _, err := gatehouseFacade.GrantPermission(setupCtx, stores.Gatehouse.Writer, gatehouseStructure.GrantSubjectTypePrincipal, node.PrincipalID, "vitals.write"); err != nil {
+		t.Fatal(err)
+	}
+	clk.Advance(time.Minute)
+	waitIdle(t, rt, gov)
+	deadline := time.Now().Add(3 * time.Second)
+	for !instanceFor() {
+		if time.Now().After(deadline) {
+			t.Fatal("with permission, the node role status never reached Vitals")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	inst, _, _ := stores.Vitals.Reader.GetInstanceByScopeKey(setupCtx, "node", scope, "noderole.myapp.sweeper")
+	rd, found, err := stores.Vitals.Reader.GetReading(setupCtx, inst.InstanceID)
+	if err != nil || !found {
+		t.Fatalf("reading: %v %v", found, err)
+	}
+	if rd.ReasonCode != noderolesvitals.ReasonPolicyNote || rd.ActorPrincipalID == nil || *rd.ActorPrincipalID != node.PrincipalID {
+		t.Fatalf("the reading should carry policy's note and be written as the node: %+v", rd)
+	}
+	if rd.ExpiresAt == nil {
+		t.Fatal("readings written by the report node role must expire")
+	}
+
+	// Revoking the permission stops further readings too, not only the first
+	// registration: the instance exists now, so only the write is checked.
+	if _, err := pool.Pgx().Exec(setupCtx, `UPDATE gatehouse_grants SET status = 'revoked' WHERE subject_id = $1 AND permission_key = 'vitals.write'`, node.PrincipalID.String()); err != nil {
+		t.Fatal(err)
+	}
+	clk.Advance(time.Minute)
+	waitIdle(t, rt, gov)
+	after, _, err := stores.Vitals.Reader.GetReading(setupCtx, inst.InstanceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !after.ObservedAt.Equal(*rd.ObservedAt) {
+		t.Fatalf("a reading was written after the node lost permission to write: observed %v then %v", rd.ObservedAt, after.ObservedAt)
 	}
 }

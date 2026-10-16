@@ -2,8 +2,8 @@
 
 **Status: design draft; the resource governor, `recurrence`, the scheduler,
 the node role runtime, the registry membership node role, the Gatehouse-core
-integration, the SDK wiring and the Policy integration are built** (see the
-"Status of..." sections near the end). The Vitals integration is still design. Like
+integration, the SDK wiring, the Policy integration and the Vitals reporting
+are built** (see the "Status of..." sections near the end). Like
 [`18-peer-discovery-and-capabilities-model.md`](18-peer-discovery-and-capabilities-model.md),
 which this builds on, it pins vocabulary and boundaries first.
 
@@ -494,7 +494,7 @@ limits, and refuses an adoption that states nothing.
    floors on schedules when those are built.
 8. **`Stats()`** gives running and waiting counts and cumulative counters per
    node role (submitted, started, completed, failed, cancelled, coalesced, shed
-   by reason) for the Vitals integration to report. Nothing reports them yet.
+   by reason) for the Vitals integration to report (`noderolesvitals` does).
 
 **Tested** with real goroutines under the race detector: no level is ever
 over its cap; priority and age ordering; pressure holding work and not
@@ -780,10 +780,58 @@ reconfiguration it needed underneath:
    last-applied state, the merge modes, the ownership rule, the refresher
    exemption and the stale-adoption check each fail a test.
 
+**Built: Vitals reporting (`noderolesvitals`).** A `Reporter` turns
+`Runtime.Status()` into readings: one per adopted node role (definition
+`archipelago.noderole.status`, instance `noderole.<key>` in scope
+`node`/`<the node's principal>`) and one for the governor
+(`archipelago.noderole.governor`).
+
+1. **State is judged on change since the last report, not on totals.** The
+   counters are cumulative, so a state judged on them would stay bad forever
+   after one failure. The reporter remembers the previous counters: a node role
+   with failed runs, shed work or missed slots since the last report is a
+   `warning`; one the node is no longer authorized to run is `failed`; one whose
+   every duty is switched off is `disabled`; otherwise `ok`. A count that went
+   down is read as a re-adoption (starting again from zero), not a negative
+   change. If a reading could not be written, the counters are not advanced, so
+   what happened in the meantime still shows next time.
+2. **A clamp or a policy note is visible but not unhealthy.** A budget a ceiling
+   reduced is `ok` with reason `noderole.budget_clamped` and the clamps in the
+   details; what policy could not apply as asked (a request capped at the
+   adoption, an interval raised to a floor, policy unreadable) arrives from
+   `noderolespolicy.Binding.Notes` as reason `noderole.policy_note`. The
+   governor reading is `warning`/`degraded` under elevated/high pressure.
+3. **Steady nodes write no history.** Vitals keeps a history row only when the
+   state, summary or reason changes, so summaries and reason codes are fixed
+   phrases with no numbers; the numbers (effective and clamped limits, the
+   governor's counters, every duty's counters and next slot) are in the
+   details. Reports leave one current row and a history of transitions only.
+4. **Readings expire** (`ExpiresAt`, three reporting intervals by default), so
+   a dead node's last reading goes stale instead of looking healthy; nothing is
+   deleted when a node role closes.
+5. **Authority.** The reporter writes through a `Sink`. The SDK supplies one
+   built on `vitalsauth` that acts as the node's principal, so a node reports
+   into its own scope only if it holds `vitals.write` there (checked on
+   registering the instance and on every reading, so a revocation stops
+   reporting too); without Gatehouse it writes directly.
+6. **Tested** against real Postgres on a manual clock, plus end to end through
+   the SDK: a healthy node role with its limits, duties and expiry; a ceiling's
+   clamp; a failure that is a warning for one report and `ok` again after,
+   with exactly the ok/warning/ok history rows; a steady node writing one
+   history row however often it reports; a failed write not losing what
+   happened meanwhile; a lost authorization and its recovery; a re-adopted
+   node role judged on fresh counters; one node role's failure not stopping the
+   others; instances ensured once; pressure; and fail-closed without
+   permission. Judging totals, losing counters on a failed write, not forgetting
+   closed roles, ignoring any one kind of shed work, any one condition in the
+   precedence, the expiry, the policy notes, the actor, and bypassing authority
+   on either the instance or the reading each fail a test.
+
 **Not built:** policy for a governor `Rate` (a pair; merging its halves
 independently is meaningless, so it needs a design of its own); Policy-held
 duty targets and configuration beyond cadence; Policy-invited adoption; a
-Policy change feed (refresh polls); Vitals reporting of status and clamps; node-local
+Policy change feed (refresh polls); per-duty Vitals instances (duties are in
+their node role's details); alerting on a stale or missing reading; node-local
 adoption config in TOML; the `vitals` retention-sweep node role; executor
 admission through the governor; and a shutdown event.
 

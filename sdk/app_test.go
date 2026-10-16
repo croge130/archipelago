@@ -19,6 +19,7 @@ import (
 	policyStructure "github.com/croge130/archipelago/policy/structure"
 	"github.com/croge130/archipelago/recurrence"
 	"github.com/croge130/archipelago/scheduler"
+	vitalsFacade "github.com/croge130/archipelago/vitals/facade"
 	"github.com/google/uuid"
 )
 
@@ -27,6 +28,8 @@ import (
 // the tests below prove by merely not panicking.
 type nilGatehouseReader struct{ gatehouseFacade.Reader }
 type nilJobsReader struct{ jobsFacade.Reader }
+type nilVitalsReader struct{ vitalsFacade.Reader }
+type nilVitalsWriter struct{ vitalsFacade.Writer }
 
 func gatehouseOnly() Stores {
 	return Stores{Gatehouse: GatehouseStores{Reader: nilGatehouseReader{}}}
@@ -448,6 +451,64 @@ func TestSeedEnsuresNodeRolePolicyDefinitionsOnlyWithBothModes(t *testing.T) {
 		t.Errorf("with both modes and no Writer the step should be present and skipped: %+v %v", s, ok)
 	}
 	for _, m := range []Modes{{NodeRoles: true}, {Policy: true}} {
+		if _, ok := has(m); ok {
+			t.Errorf("modes %+v: a step for a mode combination that is not on", m)
+		}
+	}
+}
+
+func TestNodeRoleVitalsNeedsItsModesAndAWriter(t *testing.T) {
+	for _, m := range []Modes{{NodeRoles: true}, {Vitals: true}, {}} {
+		var stores Stores
+		cfg := Config{}
+		// Both stores are present whatever the modes, so only the modes can be what refuses.
+		stores.Vitals = VitalsStores{Reader: nilVitalsReader{}, Writer: nilVitalsWriter{}}
+		if m.NodeRoles {
+			cfg.NodeRoles = nodeRoleConfig(t)
+		}
+		app, err := New(stores, m, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.NodeRoleVitals(); err == nil {
+			t.Errorf("modes %+v: node role vitals worked without both modes", m)
+		}
+		if _, err := app.NodeRoleVitalsReport(time.Minute); err == nil {
+			t.Errorf("modes %+v: the report node role was built without both modes", m)
+		}
+	}
+	app, _ := New(Stores{Vitals: VitalsStores{Reader: nilVitalsReader{}}}, Modes{NodeRoles: true, Vitals: true}, Config{NodeRoles: nodeRoleConfig(t)})
+	if _, err := app.NodeRoleVitals(); err == nil || !strings.Contains(err.Error(), "Writer") {
+		t.Errorf("a read-only Vitals node: %v", err)
+	}
+}
+
+func TestSeedEnsuresNodeRoleVitalsDefinitionsOnlyWithBothModes(t *testing.T) {
+	has := func(m Modes) (SeedStep, bool) {
+		var stores Stores
+		cfg := Config{}
+		if m.Vitals {
+			stores.Vitals.Reader = nilVitalsReader{}
+		}
+		if m.NodeRoles {
+			cfg.NodeRoles = nodeRoleConfig(t)
+		}
+		app, err := New(stores, m, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		report, _ := app.Seed(context.Background())
+		for _, s := range report {
+			if s.Name == "noderolesvitals.EnsureDefinitions" {
+				return s, true
+			}
+		}
+		return SeedStep{}, false
+	}
+	if s, ok := has(Modes{NodeRoles: true, Vitals: true}); !ok || s.Status != SeedSkipped {
+		t.Errorf("with both modes and no Writer the step should be present and skipped: %+v %v", s, ok)
+	}
+	for _, m := range []Modes{{NodeRoles: true}, {Vitals: true}} {
 		if _, ok := has(m); ok {
 			t.Errorf("modes %+v: a step for a mode combination that is not on", m)
 		}
