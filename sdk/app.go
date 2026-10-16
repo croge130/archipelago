@@ -8,6 +8,7 @@ import (
 
 	certstoreEvaluation "github.com/croge130/archipelago/certstore/evaluation"
 	"github.com/croge130/archipelago/noderoles"
+	"github.com/croge130/archipelago/noderolespolicy"
 	"github.com/google/uuid"
 )
 
@@ -43,6 +44,10 @@ type App struct {
 	nodeRolesOnce sync.Once
 	nodeRoles     *noderoles.Runtime
 	nodeRolesErr  error
+
+	nodeRolePolicyOnce sync.Once
+	nodeRolePolicy     *noderolespolicy.Binding
+	nodeRolePolicyErr  error
 }
 
 // New validates stores against modes and returns an App. It performs no

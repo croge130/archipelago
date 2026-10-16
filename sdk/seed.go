@@ -9,6 +9,7 @@ import (
 	gatehouseFacade "github.com/croge130/archipelago/gatehouse-core/facade"
 	"github.com/croge130/archipelago/jobsauth"
 	"github.com/croge130/archipelago/noderolesauth"
+	"github.com/croge130/archipelago/noderolespolicy"
 	vitalsFacade "github.com/croge130/archipelago/vitals/facade"
 	"github.com/croge130/archipelago/vitalsauth"
 	"github.com/croge130/archipelago/vitalsdefaults"
@@ -99,6 +100,11 @@ func (a *App) Seed(ctx context.Context) (SeedReport, error) {
 			nr := a.Config.NodeRoles
 			return noderolesauth.RegisterPermissions(ctx, a.Gatehouse.Reader, a.Gatehouse.Writer,
 				gatehouseFacade.RegisterPermissionOptions{AllowReservedNamespace: nr.AllowReservedNamespace}, nr.Definitions...)
+		})
+	}
+	if a.Modes.NodeRoles && a.Modes.Policy {
+		run("noderolespolicy.EnsureDefinitions", a.Policy.Reader != nil && a.Policy.Writer != nil, "no Policy Writer", func() error {
+			return noderolespolicy.EnsureDefinitions(ctx, a.Policy.Reader, a.Policy.Writer, a.Config.Actor)
 		})
 	}
 	if a.Modes.Vitals {

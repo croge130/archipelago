@@ -1,8 +1,10 @@
 package sdk
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +15,8 @@ import (
 	"github.com/croge130/archipelago/governor"
 	jobsFacade "github.com/croge130/archipelago/jobs/facade"
 	"github.com/croge130/archipelago/noderoles"
+	policyFacade "github.com/croge130/archipelago/policy/facade"
+	policyStructure "github.com/croge130/archipelago/policy/structure"
 	"github.com/croge130/archipelago/recurrence"
 	"github.com/croge130/archipelago/scheduler"
 	"github.com/google/uuid"
@@ -359,5 +363,93 @@ func TestMembershipNeedsItsModesAndAWriter(t *testing.T) {
 	none, _ := New(Stores{}, Modes{}, Config{})
 	if _, err := none.Membership("workers", nil, 0); err == nil {
 		t.Error("Membership worked with the modes off")
+	}
+}
+
+// brokenPolicy is a Policy Reader that cannot read anything.
+type brokenPolicy struct{ policyFacade.Reader }
+
+func (brokenPolicy) GetPolicyDefinition(context.Context, string) (policyStructure.PolicyDefinition, bool, error) {
+	return policyStructure.PolicyDefinition{}, false, errors.New("policy store unreachable")
+}
+
+func TestNodeRolePolicyNeedsBothModes(t *testing.T) {
+	for _, m := range []Modes{{NodeRoles: true}, {Policy: true}, {}} {
+		var stores Stores
+		cfg := Config{}
+		if m.Policy {
+			stores.Policy.Reader = brokenPolicy{}
+		}
+		if m.NodeRoles {
+			cfg.NodeRoles = nodeRoleConfig(t)
+		}
+		app, err := New(stores, m, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := app.NodeRolePolicy(); err == nil {
+			t.Errorf("modes %+v: node role policy worked without both modes", m)
+		}
+		if _, err := app.NodeRolePolicyRefresh(time.Minute); err == nil {
+			t.Errorf("modes %+v: the refresh node role was built without both modes", m)
+		}
+	}
+}
+
+func TestAPolicyThatCannotBeReadDoesNotUndoAnAdoptionButIsLoud(t *testing.T) {
+	var logs bytes.Buffer
+	cfg := nodeRoleConfig(t)
+	cfg.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	app, err := New(Stores{Policy: PolicyStores{Reader: brokenPolicy{}}}, Modes{NodeRoles: true, Policy: true}, Config{NodeRoles: cfg})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, _ := app.NodeRoles()
+	t.Cleanup(func() { rt.Stop(context.Background()) })
+
+	adopted, err := app.AdoptNodeRole(context.Background(), sweeper(), useDefault())
+	if err != nil || adopted == nil {
+		t.Fatalf("an unreadable policy undid the node's own adoption: %v", err)
+	}
+	if adopted.Limits() != adopted.Base() {
+		t.Errorf("it must run as adopted: %+v vs %+v", adopted.Limits(), adopted.Base())
+	}
+	if !strings.Contains(logs.String(), "its policy could not be applied") || !strings.Contains(logs.String(), "policy store unreachable") {
+		t.Errorf("the failure was not logged with its cause:\n%s", logs.String())
+	}
+	if _, err := app.ApplyNodeRolePolicy(context.Background(), adopted); err == nil {
+		t.Error("an explicit apply must surface the failure")
+	}
+}
+
+func TestSeedEnsuresNodeRolePolicyDefinitionsOnlyWithBothModes(t *testing.T) {
+	has := func(m Modes) (SeedStep, bool) {
+		var stores Stores
+		cfg := Config{}
+		if m.Policy {
+			stores.Policy.Reader = brokenPolicy{}
+		}
+		if m.NodeRoles {
+			cfg.NodeRoles = nodeRoleConfig(t)
+		}
+		app, err := New(stores, m, cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		report, _ := app.Seed(context.Background())
+		for _, s := range report {
+			if s.Name == "noderolespolicy.EnsureDefinitions" {
+				return s, true
+			}
+		}
+		return SeedStep{}, false
+	}
+	if s, ok := has(Modes{NodeRoles: true, Policy: true}); !ok || s.Status != SeedSkipped {
+		t.Errorf("with both modes and no Writer the step should be present and skipped: %+v %v", s, ok)
+	}
+	for _, m := range []Modes{{NodeRoles: true}, {Policy: true}} {
+		if _, ok := has(m); ok {
+			t.Errorf("modes %+v: a step for a mode combination that is not on", m)
+		}
 	}
 }

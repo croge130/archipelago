@@ -14,6 +14,7 @@ import (
 	gatehouseStructure "github.com/croge130/archipelago/gatehouse-core/structure"
 	"github.com/croge130/archipelago/governor"
 	"github.com/croge130/archipelago/noderoles"
+	"github.com/croge130/archipelago/noderolespolicy"
 	"github.com/croge130/archipelago/recurrence"
 	"github.com/croge130/archipelago/scheduler"
 	"github.com/croge130/archipelago/sdk"
@@ -156,5 +157,89 @@ func waitIdle(t *testing.T, rt *noderoles.Runtime, gov *governor.Governor) {
 			t.Fatal("runs never finished")
 		}
 		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+func TestPolicyShapesNodeRolesThroughTheSDKAtAdoptionAndAfterwards(t *testing.T) {
+	modes := sdk.Modes{Gatehouse: true, Policy: true, NodeRoles: true}
+	stores, _ := openStores(t, modes)
+	setupCtx := ctx5(t)
+	node, err := gatehouseFacade.EnsurePrincipal(setupCtx, stores.Gatehouse.Reader, stores.Gatehouse.Writer, "node.policy", gatehouseStructure.PrincipalTypeServiceAccount)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gov, err := governor.New(governor.Config{Node: governor.Ceiling{Concurrency: 8}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(gov.Close)
+	clk := scheduler.NewManualClock(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	hourly, _ := recurrence.Every(time.Hour, time.Time{})
+	sweeper := noderoles.Definition{
+		Key: "myapp.sweeper", Default: &governor.Limits{Concurrency: 3, QueueDepth: 3},
+		Duties: []noderoles.Duty{{Name: "sweep", Schedule: hourly, Run: func(context.Context, scheduler.Fire) error { return nil }}},
+	}
+	app, err := sdk.New(stores, modes, sdk.Config{NodeRoles: &sdk.NodeRoleConfig{
+		Governor: gov, Domain: "d", PrincipalID: node.PrincipalID, Clock: clk, Definitions: []noderoles.Definition{sweeper},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := app.Seed(setupCtx)
+	if err != nil {
+		t.Fatalf("Seed: %v (%+v)", err, report)
+	}
+	var ensured bool
+	for _, s := range report {
+		ensured = ensured || (s.Name == "noderolespolicy.EnsureDefinitions" && s.Status == sdk.SeedRan)
+	}
+	if !ensured {
+		t.Fatalf("Seed did not register the node role policy definitions: %+v", report)
+	}
+	rt, err := app.NodeRoles()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { rt.Stop(context.Background()) })
+
+	// Policy set before the node role exists shapes it from the first moment.
+	set := func(scope noderolespolicy.Scope, v any) {
+		t.Helper()
+		if _, err := noderolespolicy.Set(setupCtx, stores.Policy.Reader, stores.Policy.Writer, noderolespolicy.KeyConcurrency, scope, v, "operator:test"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	set(noderolespolicy.ForRole("myapp.sweeper"), 1)
+	adopted, err := app.AdoptNodeRole(setupCtx, sweeper, noderoles.Adoption{Budget: governor.Adoption{UseDefault: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adopted.Base().Concurrency != 3 || adopted.Limits().Concurrency != 1 {
+		t.Fatalf("base %+v limits %+v: policy was not applied at adoption", adopted.Base(), adopted.Limits())
+	}
+
+	// The refresh node role carries later edits to the running node role.
+	refresh, err := app.NodeRolePolicyRefresh(time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.AdoptNodeRole(setupCtx, refresh, noderoles.Adoption{Budget: governor.Adoption{UseDefault: true}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := rt.Start(); err != nil {
+		t.Fatal(err)
+	}
+	set(noderolespolicy.ForRole("myapp.sweeper"), 2)
+	clk.Advance(time.Minute)
+	deadline := time.Now().Add(3 * time.Second)
+	for adopted.Limits().Concurrency != 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("the edit never reached the running node role: %+v", adopted.Limits())
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if adopted.Base().Concurrency != 3 {
+		t.Fatalf("policy moved the adopted base: %+v", adopted.Base())
 	}
 }

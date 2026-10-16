@@ -2,8 +2,8 @@
 
 **Status: design draft; the resource governor, `recurrence`, the scheduler,
 the node role runtime, the registry membership node role, the Gatehouse-core
-integration and the SDK wiring are built** (see the "Status of..." sections
-near the end). The Policy and Vitals integrations are still design. Like
+integration, the SDK wiring and the Policy integration are built** (see the
+"Status of..." sections near the end). The Vitals integration is still design. Like
 [`18-peer-discovery-and-capabilities-model.md`](18-peer-discovery-and-capabilities-model.md),
 which this builds on, it pins vocabulary and boundaries first.
 
@@ -258,9 +258,10 @@ for a duty has to say which it needs.
 
 **Schedules are configuration.** A node role declares a default schedule, and
 the domain's Policy may override it. A node role can also declare a *floor*
-(for example "no more often than every ten seconds") as a
-`typeconstraints` bound, so a policy value cannot ask for a schedule the
-node role was never designed to withstand. Clamps are reported, as for budgets.
+(for example "no more often than every thirty seconds"): `Duty.MinInterval`, a
+plain duration because it is a permanently fixed type, applied by the Policy
+integration so a policy value cannot ask for a schedule the node role was never
+designed to withstand. A raised interval is reported, as clamps are for budgets.
 
 **What the scheduler is not.** It is in-process. It has no durable
 queue, no cross-node deduplication, and no workflow. Anything that must
@@ -602,10 +603,9 @@ first instead of the latest, recording at offer time, letting jitter
 accumulate, ignoring the catch-up bound, and never retrying a deferral each
 fail a test.
 
-**Not built:** the governor adapter and everything else in `noderoles`; a
-durable `Record`; a shutdown event; and the Policy integration that lets a
-domain override a schedule within the node role's declared floor (the floor is
-a `typeconstraints` bound applied there, not in the scheduler).
+**Not built:** a durable `Record` and a shutdown event. (The Policy integration that lets a
+domain override a schedule within a duty's floor is built; see the Policy
+status below. The floor is applied there, not in the scheduler.)
 
 ## Status of the node role runtime
 
@@ -730,9 +730,60 @@ the node's authority) and `App.Membership`, with a Seed step for the
 permissions of the node roles a node expects to adopt. A node adopts and runs
 node roles through nothing but the SDK, tested against real Postgres.
 
-**Not built:** the Policy integration that resolves a domain's requested
-budget and schedule with `typedvalue` and `typeconstraints` and enforces a
-node role's declared floor; Vitals reporting of status and clamps; node-local
+**Built: the Policy integration (`noderolespolicy`)**, with the live
+reconfiguration it needed underneath:
+
+1. **A running node role can be reconfigured.** `governor.Role.Reconfigure`
+   re-applies the domain share and node ceiling to a new request without
+   disturbing running work (growing concurrency starts waiting work; shrinking
+   never kills, it holds new starts; a shorter queue sheds new arrivals, not
+   what already waits). `Scheduler.Reschedule` changes a duty's cadence from
+   now and `SetEnabled` stops or resumes it; a generation counter makes a timer
+   armed before the change harmless. `noderoles.Adopted.Reconfigure(Update)`
+   applies a budget, schedules and enabled flags together, and applies nothing
+   if a named duty does not exist. `Adopted.Base()` is what the node adopted
+   (the policy ceiling); `Limits()` is what runs (after the domain and node
+   ceilings); `DefaultSchedule()` is what policy removal restores.
+2. **Policy keys are scalars, one per dimension** (`typedvalue.Count` of a
+   registered `run` kind, `DurationSeconds`, `Bool`), because a partial budget
+   object cannot exist (an object needs all its fields): `budget.concurrency`,
+   `budget.queue_depth`, `budget.run_timeout`, `schedule.interval` and
+   `schedule.enabled`, under `archipelago.noderoles`. Values attach to the
+   whole platform, a domain, a node role, or (schedule keys) one duty.
+3. **Policy only narrows.** Budgets merge by minimum, intervals by maximum,
+   `enabled` by boolean-and, so where scopes disagree the more restrictive wins
+   (Policy's override mode allows one non-global instance per definition, which
+   a per-role value cannot live with). A request above what the node adopted is
+   capped at it and reported; an interval below a duty's `MinInterval` is
+   raised to it and reported; an interval for an event-driven duty is refused
+   with a note. A governor ceiling still applies on top, and its clamps are
+   reported too. Raising a role above its adoption is not something policy can
+   do; that stays the node's decision.
+4. **A `Binding` applies the difference.** It remembers what it applied, so a
+   refresh that finds nothing new touches nothing (re-applying a schedule would
+   restart its phase), removing a value restores the adopted setting, and a
+   duty the app itself disabled is not re-enabled by policy. If policy cannot be
+   read nothing is applied and the node role keeps running as it was. A
+   re-adopted node role gets policy applied afresh. `RefreshRole` is the node
+   role that polls and re-applies; policy never configures it, since a refresher
+   disabled by policy could never be re-enabled by it.
+5. **Tested** against real Postgres, with the real runtime on a manual clock:
+   definitions idempotent and never silently redefined; silent policy touches
+   nothing, including when a ceiling already reduced the budget; apply, stable
+   re-apply and restore; caps on each dimension (and a timeout being a
+   tightening when none was adopted); scope merging and other domains ignored;
+   rescheduling by real runs and not only by inspection; the floor; the
+   event-driven refusal; enable/disable ownership; constraints rejecting values
+   at the door; a ceiling still applying; a store failure changing nothing;
+   refresh reaching running roles and continuing past one that fails; and the
+   SDK path end to end. Ignoring the cap, the floor, the adoption base, the
+   last-applied state, the merge modes, the ownership rule, the refresher
+   exemption and the stale-adoption check each fail a test.
+
+**Not built:** policy for a governor `Rate` (a pair; merging its halves
+independently is meaningless, so it needs a design of its own); Policy-held
+duty targets and configuration beyond cadence; Policy-invited adoption; a
+Policy change feed (refresh polls); Vitals reporting of status and clamps; node-local
 adoption config in TOML; the `vitals` retention-sweep node role; executor
 admission through the governor; and a shutdown event.
 

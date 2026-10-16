@@ -10,6 +10,7 @@ require (
 	github.com/croge130/archipelago/governor v0.0.0
 	github.com/croge130/archipelago/jobs v0.0.0
 	github.com/croge130/archipelago/noderoles v0.0.0
+	github.com/croge130/archipelago/noderolespolicy v0.0.0
 	github.com/croge130/archipelago/policy v0.0.0
 	github.com/croge130/archipelago/recurrence v0.0.0
 	github.com/croge130/archipelago/scheduler v0.0.0
@@ -25,6 +26,7 @@ replace (
 	github.com/croge130/archipelago/governor => ../governor
 	github.com/croge130/archipelago/jobs => ../jobs
 	github.com/croge130/archipelago/noderoles => ../noderoles
+	github.com/croge130/archipelago/noderolespolicy => ../noderolespolicy
 	github.com/croge130/archipelago/policy => ../policy
 	github.com/croge130/archipelago/recurrence => ../recurrence
 	github.com/croge130/archipelago/scheduler => ../scheduler

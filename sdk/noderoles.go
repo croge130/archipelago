@@ -11,6 +11,7 @@ import (
 	"github.com/croge130/archipelago/governor"
 	"github.com/croge130/archipelago/noderoles"
 	"github.com/croge130/archipelago/noderolesauth"
+	"github.com/croge130/archipelago/noderolespolicy"
 	"github.com/croge130/archipelago/registrynoderole"
 	"github.com/croge130/archipelago/scheduler"
 	"github.com/google/uuid"
@@ -89,7 +90,74 @@ func (a *App) AdoptNodeRole(ctx context.Context, def noderoles.Definition, adopt
 	} else if len(def.Permissions) > 0 {
 		return nil, fmt.Errorf("%w: %s needs %v", ErrCannotAuthorize, def.Key, def.Permissions)
 	}
-	return rt.Adopt(ctx, def, adoption)
+	adopted, err := rt.Adopt(ctx, def, adoption)
+	if err != nil {
+		return nil, err
+	}
+	if a.Modes.Policy {
+		// The adoption stands whatever policy says or fails to say: it is the
+		// node's own decision and the safe fallback. A failure is logged, and
+		// the refresh node role (or ApplyNodeRolePolicy) retries.
+		if _, perr := a.ApplyNodeRolePolicy(ctx, adopted); perr != nil {
+			a.nodeRoleLogger().Warn("node role adopted, but its policy could not be applied; it runs as adopted",
+				"role", def.Key, "error", perr)
+		}
+	}
+	return adopted, nil
+}
+
+func (a *App) nodeRoleLogger() *slog.Logger {
+	if l := a.Config.NodeRoles.Logger; l != nil {
+		return l
+	}
+	return slog.Default()
+}
+
+// NodeRolePolicy is this App's binding of Policy to its node roles, created on
+// first use. It needs the NodeRoles and Policy modes.
+func (a *App) NodeRolePolicy() (*noderolespolicy.Binding, error) {
+	if !a.Modes.NodeRoles || !a.Modes.Policy {
+		return nil, errors.New("sdk: node role policy needs both the NodeRoles and Policy modes enabled")
+	}
+	a.nodeRolePolicyOnce.Do(func() {
+		nr := a.Config.NodeRoles
+		cfg := noderolespolicy.BindingConfig{Store: a.Policy.Reader, Domain: nr.Domain, Logger: nr.Logger}
+		if nr.Clock != nil {
+			cfg.Clock = nr.Clock.Now
+		}
+		a.nodeRolePolicy, a.nodeRolePolicyErr = noderolespolicy.NewBinding(cfg)
+	})
+	return a.nodeRolePolicy, a.nodeRolePolicyErr
+}
+
+// ApplyNodeRolePolicy resolves Policy for an adopted node role and brings it
+// in line: a budget and schedule within what the node adopted, honouring each
+// duty's floor. Nothing is applied if Policy cannot be read.
+func (a *App) ApplyNodeRolePolicy(ctx context.Context, adopted *noderoles.Adopted) (noderolespolicy.Report, error) {
+	b, err := a.NodeRolePolicy()
+	if err != nil {
+		return noderolespolicy.Report{}, err
+	}
+	return b.Apply(ctx, adopted)
+}
+
+// NodeRolePolicyRefresh returns the node role that re-applies Policy to every
+// adopted node role each interval, so an edit reaches running node roles. Adopt
+// it with AdoptNodeRole like any other.
+func (a *App) NodeRolePolicyRefresh(every time.Duration) (noderoles.Definition, error) {
+	rt, err := a.NodeRoles()
+	if err != nil {
+		return noderoles.Definition{}, err
+	}
+	b, err := a.NodeRolePolicy()
+	if err != nil {
+		return noderoles.Definition{}, err
+	}
+	anchor := time.Now()
+	if c := a.Config.NodeRoles.Clock; c != nil {
+		anchor = c.Now()
+	}
+	return noderolespolicy.RefreshRole(rt, b, every, anchor)
 }
 
 // Membership builds the registry membership node role over this App's own
